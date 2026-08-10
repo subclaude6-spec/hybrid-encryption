@@ -1,0 +1,18 @@
+node_modules/
+dist/
+release/
+
+# Local env / secrets — OAuth client secrets and SMTP creds land here later
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
