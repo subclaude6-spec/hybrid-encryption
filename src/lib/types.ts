@@ -6,6 +6,15 @@ export type UserStatus = 'active' | 'suspended' | 'pending'
  *  account is linked — either one works. */
 export type AuthProvider = 'password' | 'google' | 'both'
 
+export interface Passkey {
+  id: string
+  label: string
+  kind: 'platform' | 'phone' | 'security-key'
+  authenticator: string
+  createdAt: string
+  lastUsedAt: string | null
+}
+
 export interface User {
   id: string
   name: string
@@ -19,6 +28,7 @@ export interface User {
   mustChangePassword: boolean
   createdAt: string
   lastActiveAt: string | null
+  passkeys?: Passkey[]
 }
 
 export type ProviderId = 'gdrive' | 'github' | 'dropbox' | 'onedrive' | 'mega'
