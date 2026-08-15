@@ -2,7 +2,7 @@ import { ApiRequestError, api } from './api'
 import type { User } from './types'
 
 /** Shape the server returns (see User.toJSON on the server). */
-interface ApiUser {
+export interface ApiUser {
   id: string
   name: string
   email: string

@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowRight,
@@ -7,9 +7,9 @@ import {
   Copy,
   FileLock2,
   Loader2,
-  Mail,
   ShieldCheck,
   UploadCloud,
+  Wifi,
 } from 'lucide-react'
 import { useApp } from '@/store/AppStore'
 import { useToast } from '@/components/ui/Toast'
@@ -17,28 +17,90 @@ import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import { Badge, Button, Card, CardHeader, Progress } from '@/components/ui/primitives'
 import { CloudProviderPicker } from '@/components/CloudProviderPicker'
 import { CloudFileBrowser } from '@/components/CloudFileBrowser'
+import { GoogleAccountPicker } from '@/components/GoogleAccountPicker'
 import { LocalFileDrop } from '@/components/LocalFileDrop'
 import { ProviderIcon } from '@/components/domain'
+import { ApiRequestError } from '@/lib/api'
+import { encryptFile, generateKeyString } from '@/lib/crypto'
+import { type ApiVaultFile, uploadEncryptedToGoogleDrive } from '@/lib/providers'
+import { getSocket } from '@/lib/socket'
 import type { ProviderId } from '@/lib/types'
-import { cn, formatBytes, sleep } from '@/lib/utils'
-import { providerById } from '@/lib/mock-data'
+import { cn, formatBytes } from '@/lib/utils'
 
 const STEPS = ['Destination', 'Select files', 'Encrypt & upload', 'Key delivery']
 
 type FileProgress = { name: string; percent: number; done: boolean }
 
 export default function Upload() {
-  const { providers, currentUser, recordEncryption, connectProvider } = useApp()
+  const { providers, currentUser, refreshProviders, connectProvider, disconnectProvider } = useApp()
   const toast = useToast()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [step, setStep] = useState(0)
   const [providerId, setProviderId] = useState<ProviderId | null>(null)
+  const [accountId, setAccountId] = useState<string | null>(null)
+  const [accountModalOpen, setAccountModalOpen] = useState(false)
+  const [disconnectingId, setDisconnectingId] = useState<string | null>(null)
   const [files, setFiles] = useState<File[]>([])
   const [progress, setProgress] = useState<FileProgress[]>([])
   const [issuedKey, setIssuedKey] = useState<string | null>(null)
+  const [uploaded, setUploaded] = useState<ApiVaultFile[]>([])
   const [copied, setCopied] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
 
-  const provider = providerId ? providerById(providerId) : null
+  const provider = providerId ? providers.find((p) => p.id === providerId) ?? null : null
+  const account = provider?.accounts.find((a) => a.id === accountId) ?? null
+  const isAdmin = currentUser?.role === 'admin'
+  const filesPath = isAdmin ? '/admin/vault' : '/app/history'
+
+  // The Google Drive OAuth callback lands back here with these query params —
+  // pick up where the user left off instead of dropping them at step 0.
+  useEffect(() => {
+    const connected = searchParams.get('connected')
+    const account = searchParams.get('account')
+    const returnedAccountId = searchParams.get('accountId')
+    const error = searchParams.get('error')
+    const returnedProvider = searchParams.get('provider')
+
+    if (connected === '1' && returnedProvider === 'gdrive') {
+      refreshProviders().catch(() => undefined)
+      setProviderId('gdrive')
+      if (returnedAccountId) setAccountId(returnedAccountId)
+      setStep(1)
+      toast({
+        tone: 'success',
+        title: 'Google Drive connected',
+        description: account ? `Signed in as ${account}.` : undefined,
+      })
+      setSearchParams({}, { replace: true })
+    } else if (error) {
+      toast({ tone: 'error', title: 'Could not connect Google Drive', description: error })
+      setSearchParams({}, { replace: true })
+    }
+    // Only ever fires from the redirect that landed on this page — deliberately
+    // not re-running when the user later edits providerId/step themselves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Realtime: another tab, device, or an admin watching the audit log sees the
+  // same upload the instant it lands — this just surfaces that for the
+  // employee too, e.g. if they have this page open in two windows.
+  useEffect(() => {
+    const socket = getSocket()
+    if (!socket) return
+    const onCreated = (file: ApiVaultFile) => {
+      if (file.owner === currentUser?.id) return // this tab already knows — it did the upload
+      toast({
+        tone: 'info',
+        title: 'New file in the vault',
+        description: `${file.originalName} was encrypted and uploaded by ${file.ownerName}.`,
+      })
+    }
+    socket.on('file:created', onCreated)
+    return () => {
+      socket.off('file:created', onCreated)
+    }
+  }, [currentUser, toast])
 
   const oversized = useMemo(() => {
     if (!provider?.maxFileBytes) return []
@@ -46,44 +108,79 @@ export default function Upload() {
   }, [files, provider])
 
   async function runEncryption() {
-    if (!providerId || files.length === 0) return
+    if (!providerId || !accountId || files.length === 0) return
     setStep(2)
+    setUploadError(null)
     setProgress(files.map((f) => ({ name: f.name, percent: 0, done: false })))
 
-    for (let i = 0; i < files.length; i++) {
-      for (let p = 0; p <= 100; p += 10) {
-        await sleep(55)
+    const keyString = generateKeyString()
+    const results: ApiVaultFile[] = []
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+
+        const encrypted = await encryptFile(file, {
+          keyString,
+          onProgress: (p) => {
+            // Encryption is the first half of the bar, upload is the second.
+            const percent = Math.round(p.percent * 0.5)
+            setProgress((prev) => prev.map((row, idx) => (idx === i ? { ...row, percent } : row)))
+          },
+        })
+
+        const { file: record } = await uploadEncryptedToGoogleDrive({
+          accountId,
+          blob: encrypted.blob,
+          encryptedName: encrypted.encryptedName,
+          originalName: file.name,
+          keyId: encrypted.keyId,
+          iv: encrypted.header.ivPrefix,
+          mimeType: file.type || 'application/octet-stream',
+          originalSize: file.size,
+          onProgress: (p) => {
+            const percent = 50 + Math.round(p * 0.5)
+            setProgress((prev) => prev.map((row, idx) => (idx === i ? { ...row, percent } : row)))
+          },
+        })
+
+        results.push(record)
         setProgress((prev) =>
-          prev.map((row, idx) => (idx === i ? { ...row, percent: p } : row)),
+          prev.map((row, idx) => (idx === i ? { ...row, percent: 100, done: true } : row)),
         )
       }
-      setProgress((prev) =>
-        prev.map((row, idx) => (idx === i ? { ...row, percent: 100, done: true } : row)),
-      )
-    }
 
-    const { key } = recordEncryption({
-      fileNames: files.map((f) => f.name),
-      sizes: files.map((f) => f.size),
-      providerId,
-    })
-    setIssuedKey(key)
-    await sleep(400)
-    setStep(3)
-    toast({
-      tone: 'success',
-      title: 'Upload complete',
-      description: `${files.length} file${files.length > 1 ? 's' : ''} encrypted and stored on ${providerById(providerId).name}.`,
-    })
+      setIssuedKey(keyString)
+      setUploaded(results)
+      setStep(3)
+      toast({
+        tone: 'success',
+        title: 'Upload complete',
+        description: `${files.length} file${files.length > 1 ? 's' : ''} encrypted and stored on ${provider?.name ?? 'Google Drive'}.`,
+      })
+    } catch (err) {
+      const message =
+        err instanceof ApiRequestError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Encryption or upload failed.'
+      setUploadError(message)
+      toast({ tone: 'error', title: 'Upload failed', description: message })
+      setStep(1)
+    }
   }
 
   function reset() {
     setStep(0)
     setProviderId(null)
+    setAccountId(null)
     setFiles([])
     setProgress([])
     setIssuedKey(null)
+    setUploaded([])
     setCopied(false)
+    setUploadError(null)
   }
 
   async function copyKey() {
@@ -130,22 +227,64 @@ export default function Upload() {
               value={providerId}
               onSelect={(id) => {
                 setProviderId(id)
+                const target = providers.find((p) => p.id === id)
+                if (id === 'gdrive' && (target?.accounts.length ?? 0) > 0) {
+                  // Several Google accounts can be connected — always ask
+                  // which one, rather than silently reusing the last pick.
+                  setAccountModalOpen(true)
+                  return
+                }
                 setStep(1)
               }}
               onConnect={(id) => {
-                connectProvider(id, currentUser?.email ?? 'account@company.io')
-                toast({
-                  tone: 'success',
-                  title: `${providerById(id).name} connected`,
-                  description: 'OAuth token stored in the OS credential vault.',
-                })
+                try {
+                  connectProvider(id)
+                } catch (err) {
+                  toast({
+                    tone: 'error',
+                    title: 'Not available yet',
+                    description: err instanceof Error ? err.message : undefined,
+                  })
+                }
               }}
             />
           </div>
         ) : null}
 
+        <GoogleAccountPicker
+          open={accountModalOpen}
+          onClose={() => {
+            setAccountModalOpen(false)
+            if (accountId) setStep(1)
+          }}
+          accounts={provider?.accounts ?? []}
+          selectedId={accountId}
+          onSelect={setAccountId}
+          onConnectAnother={() => {
+            setAccountModalOpen(false)
+            connectProvider('gdrive')
+          }}
+          onDisconnect={async (id) => {
+            setDisconnectingId(id)
+            try {
+              await disconnectProvider('gdrive', id)
+              if (accountId === id) setAccountId(null)
+              toast({ tone: 'info', title: 'Google Drive account disconnected' })
+            } catch (err) {
+              toast({
+                tone: 'error',
+                title: 'Could not disconnect',
+                description: err instanceof Error ? err.message : undefined,
+              })
+            } finally {
+              setDisconnectingId(null)
+            }
+          }}
+          disconnectingId={disconnectingId}
+        />
+
         {/* step 2 — pick files */}
-        {step === 1 && provider ? (
+        {step === 1 && provider && (provider.id !== 'gdrive' || account) ? (
           <div className="animate-in-up grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
             <div className="space-y-4">
               <Card className="p-4">
@@ -155,9 +294,19 @@ export default function Upload() {
                     <p className="text-sm font-medium text-fg">
                       Uploading to {provider.name}
                     </p>
-                    <p className="truncate text-xs text-fg-muted">{provider.account}</p>
+                    <p className="truncate text-xs text-fg-muted">
+                      {account?.email ?? provider.blurb}
+                    </p>
                   </div>
-                  <Button variant="ghost" size="sm" onClick={() => setStep(0)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      provider.id === 'gdrive' && provider.accounts.length > 0
+                        ? setAccountModalOpen(true)
+                        : setStep(0)
+                    }
+                  >
                     Change
                   </Button>
                 </div>
@@ -181,6 +330,13 @@ export default function Upload() {
                 </div>
               ) : null}
 
+              {uploadError ? (
+                <div className="flex items-start gap-2.5 rounded-xl border border-danger/25 bg-danger/[0.07] px-4 py-3">
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" />
+                  <p className="text-xs leading-relaxed text-danger">{uploadError}</p>
+                </div>
+              ) : null}
+
               <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-fg-muted">
                   {files.length > 0
@@ -189,7 +345,7 @@ export default function Upload() {
                 </p>
                 <Button
                   size="lg"
-                  disabled={files.length === 0}
+                  disabled={files.length === 0 || oversized.length > 0}
                   icon={<ShieldCheck className="size-4" />}
                   onClick={runEncryption}
                 >
@@ -204,7 +360,7 @@ export default function Upload() {
                 Current contents of {provider.name}
               </p>
               <div className="min-h-0 flex-1">
-                <CloudFileBrowser providerId={provider.id} />
+                <CloudFileBrowser providerId={provider.id} accountId={accountId} />
               </div>
             </div>
           </div>
@@ -260,7 +416,7 @@ export default function Upload() {
                 <Check className="size-7 text-ok" strokeWidth={2.5} />
               </div>
               <h2 className="mt-5 text-lg font-semibold tracking-tight text-fg">
-                {files.length} file{files.length > 1 ? 's' : ''} encrypted and uploaded
+                {uploaded.length} file{uploaded.length > 1 ? 's' : ''} encrypted and uploaded
               </h2>
               <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-fg-muted">
                 Stored on {provider.name} as ciphertext. Without the key below, the file is
@@ -290,12 +446,12 @@ export default function Upload() {
                 </div>
 
                 <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-ink-700 bg-ink-900 px-4 py-3">
-                  <Mail className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
+                  <Wifi className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
                   <div className="text-xs leading-relaxed text-fg-muted">
-                    <p className="font-medium text-fg">Key delivered by email</p>
+                    <p className="font-medium text-fg">Uploaded to Google Drive live</p>
                     <p className="mt-1">
-                      Sent to <span className="text-fg">{currentUser?.email}</span> and{' '}
-                      <span className="text-fg">arjun@company.io</span> (administrator).
+                      Each file now has its own Drive file ID and shows up in your
+                      administrator's dashboard immediately over the realtime channel.
                     </p>
                   </div>
                 </div>
@@ -303,9 +459,8 @@ export default function Upload() {
                 <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-warn/25 bg-warn/[0.07] px-4 py-3">
                   <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warn" />
                   <p className="text-xs leading-relaxed text-warn">
-                    Anyone holding this key can read the file. In the production build the
-                    email carries a one-time link instead of the key itself, and the real
-                    key stays wrapped to your passkey.
+                    This key is shown once, here, and never stored on the server. Copy it
+                    now — anyone holding it can read the file.
                   </p>
                 </div>
               </div>
@@ -315,8 +470,8 @@ export default function Upload() {
               <Button variant="outline" icon={<UploadCloud className="size-4" />} onClick={reset}>
                 Encrypt more files
               </Button>
-              <Link to="/app/history">
-                <Button variant="ghost">View my files</Button>
+              <Link to={filesPath}>
+                <Button variant="ghost">{isAdmin ? 'View all files' : 'View my files'}</Button>
               </Link>
             </div>
           </div>

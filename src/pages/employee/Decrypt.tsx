@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -11,60 +11,54 @@ import {
   ShieldCheck,
   UploadCloud,
 } from 'lucide-react'
-import { keyMatches, useApp } from '@/store/AppStore'
+import { useApp } from '@/store/AppStore'
 import { useToast } from '@/components/ui/Toast'
 import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import { Badge, Button, Card, CardHeader, Input } from '@/components/ui/primitives'
 import { Modal } from '@/components/ui/Modal'
 import { CloudProviderPicker } from '@/components/CloudProviderPicker'
 import { CloudFileBrowser } from '@/components/CloudFileBrowser'
+import { GoogleAccountPicker } from '@/components/GoogleAccountPicker'
 import { LocalFileDrop } from '@/components/LocalFileDrop'
 import { ProviderIcon } from '@/components/domain'
-import { CLOUD_FILES, providerById } from '@/lib/mock-data'
-import type { ProviderId, VaultFile } from '@/lib/types'
-import { cn, formatBytes, sleep } from '@/lib/utils'
+import { providerById } from '@/lib/mock-data'
+import { ApiRequestError } from '@/lib/api'
+import { CorruptFileError, decryptFile, WrongKeyError } from '@/lib/crypto'
+import { downloadFromGoogleDrive } from '@/lib/providers'
+import type { CloudFile, ProviderId } from '@/lib/types'
+import { cn, formatBytes } from '@/lib/utils'
 
 type Mode = 'choose' | 'upload' | 'fetch'
 
-const KEY_SHAPE = /^HCE-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/
-
 export default function Decrypt() {
-  const { providers, vaultFiles, visibleVaultFiles, recordDecryption, connectProvider, currentUser } =
+  const { providers, visibleVaultFiles, recordDecryption, connectProvider, disconnectProvider } =
     useApp()
   const toast = useToast()
 
   const [mode, setMode] = useState<Mode>('choose')
   const [localFiles, setLocalFiles] = useState<File[]>([])
   const [providerId, setProviderId] = useState<ProviderId | null>(null)
+  const [accountId, setAccountId] = useState<string | null>(null)
+  const [accountModalOpen, setAccountModalOpen] = useState(false)
+  const [disconnectingId, setDisconnectingId] = useState<string | null>(null)
   const [cloudSelection, setCloudSelection] = useState<string[]>([])
+  const [cloudSelectionFiles, setCloudSelectionFiles] = useState<CloudFile[]>([])
+
+  const provider = providerId ? providers.find((p) => p.id === providerId) ?? null : null
 
   const [keyOpen, setKeyOpen] = useState(false)
   const [keyValue, setKeyValue] = useState('')
   const [attempts, setAttempts] = useState(0)
   const [keyError, setKeyError] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
+  const [workingStage, setWorkingStage] = useState<'download' | 'decrypt' | null>(null)
   const [result, setResult] = useState<{ name: string; blob: Blob } | null>(null)
   const [locked, setLocked] = useState(false)
 
   const myFiles = visibleVaultFiles()
 
-  /** The vault record we are trying to unlock, resolved from either path. */
-  const target: VaultFile | null = useMemo(() => {
-    if (mode === 'upload' && localFiles[0]) {
-      return vaultFiles.find((f) => f.encryptedName === localFiles[0].name) ?? null
-    }
-    if (mode === 'fetch' && cloudSelection[0] && providerId) {
-      const cloudFile = (CLOUD_FILES[providerId] ?? []).find((f) => f.id === cloudSelection[0])
-      if (!cloudFile) return null
-      return vaultFiles.find((f) => f.encryptedName === cloudFile.name) ?? null
-    }
-    return null
-  }, [mode, localFiles, cloudSelection, providerId, vaultFiles])
-
   const selectedName =
-    mode === 'upload' ? localFiles[0]?.name : cloudSelection[0]
-      ? (CLOUD_FILES[providerId!] ?? []).find((f) => f.id === cloudSelection[0])?.name
-      : undefined
+    mode === 'upload' ? localFiles[0]?.name : cloudSelectionFiles[0]?.name
 
   function openKeyPrompt() {
     setKeyValue('')
@@ -72,61 +66,91 @@ export default function Decrypt() {
     setKeyOpen(true)
   }
 
+  /**
+   * Real end-to-end decryption: the source bytes come from the actual .hce
+   * envelope (downloaded from Drive through the server relay, or read
+   * straight off the local file the user dropped), and AES-GCM's own
+   * authentication tag — not a key-string comparison — is what proves the
+   * key is right. A wrong key throws `WrongKeyError`; nothing "succeeds"
+   * silently with the wrong plaintext.
+   */
   async function submitKey() {
     if (!selectedName) return
     setWorking(true)
     setKeyError(null)
-    await sleep(900)
 
-    // A known vault record validates against its real key. An unknown envelope
-    // (e.g. one encrypted on another workstation) falls back to a format check
-    // until the crypto layer can verify the GCM auth tag for real.
-    const ok = target ? keyMatches(target, keyValue) : KEY_SHAPE.test(keyValue.trim().toUpperCase())
+    try {
+      let envelope: Blob
+      if (mode === 'upload' && localFiles[0]) {
+        envelope = localFiles[0]
+      } else if (mode === 'fetch' && cloudSelection[0] && accountId) {
+        setWorkingStage('download')
+        envelope = await downloadFromGoogleDrive({ accountId, fileId: cloudSelection[0] })
+      } else {
+        throw new Error('No file selected.')
+      }
 
-    if (!ok) {
-      const next = attempts + 1
-      setAttempts(next)
+      setWorkingStage('decrypt')
+      const decrypted = await decryptFile(envelope, keyValue)
+
+      recordDecryption({
+        fileName: decrypted.originalName,
+        providerId: mode === 'fetch' ? providerId : null,
+        success: true,
+        attempt: attempts,
+      })
+
+      setResult({ name: decrypted.originalName, blob: decrypted.blob })
       setWorking(false)
-      if (target) recordDecryption({ file: target, success: false, attempt: next })
+      setWorkingStage(null)
+      setKeyOpen(false)
+      setAttempts(0)
+      toast({
+        tone: 'success',
+        title: 'File decrypted',
+        description: `${decrypted.originalName} is ready to download.`,
+      })
+    } catch (err) {
+      setWorking(false)
+      setWorkingStage(null)
 
-      if (next >= 3) {
-        setLocked(true)
-        setKeyOpen(false)
-        toast({
-          tone: 'error',
-          title: 'Too many invalid keys',
-          description: 'Your administrator has been alerted and can revoke your access.',
+      if (err instanceof WrongKeyError) {
+        const next = attempts + 1
+        setAttempts(next)
+        recordDecryption({
+          fileName: selectedName,
+          providerId: mode === 'fetch' ? providerId : null,
+          success: false,
+          attempt: next,
         })
+
+        if (next >= 3) {
+          setLocked(true)
+          setKeyOpen(false)
+          toast({
+            tone: 'error',
+            title: 'Too many invalid keys',
+            description: 'Your administrator has been alerted and can revoke your access.',
+          })
+          return
+        }
+
+        setKeyError(`Invalid decryption key — attempt ${next} of 3.`)
         return
       }
 
-      setKeyError(`Invalid decryption key — attempt ${next} of 3.`)
-      return
+      // Corrupt/incomplete file or a download failure — not a key problem,
+      // so it doesn't count against the 3-attempt lockout.
+      const message =
+        err instanceof CorruptFileError
+          ? err.message
+          : err instanceof ApiRequestError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'Decryption failed.'
+      setKeyError(message)
     }
-
-    if (target) recordDecryption({ file: target, success: true, attempt: attempts })
-
-    const plaintext =
-      mode === 'upload' && localFiles[0]
-        ? localFiles[0]
-        : new Blob(
-            [
-              `Decrypted preview for ${target?.originalName ?? selectedName}\n` +
-                `Unlocked by ${currentUser?.email} using key ${keyValue.trim().toUpperCase()}\n` +
-                `The real plaintext bytes arrive once the AES-GCM layer is wired in.\n`,
-            ],
-            { type: 'text/plain' },
-          )
-
-    setResult({ name: target?.originalName ?? selectedName.replace(/\.hce$/, ''), blob: plaintext })
-    setWorking(false)
-    setKeyOpen(false)
-    setAttempts(0)
-    toast({
-      tone: 'success',
-      title: 'File decrypted',
-      description: `${target?.originalName ?? selectedName} is ready to download.`,
-    })
   }
 
   function download() {
@@ -143,7 +167,9 @@ export default function Decrypt() {
     setMode('choose')
     setLocalFiles([])
     setProviderId(null)
+    setAccountId(null)
     setCloudSelection([])
+    setCloudSelectionFiles([])
     setResult(null)
     setAttempts(0)
     setLocked(false)
@@ -325,7 +351,7 @@ export default function Decrypt() {
         {/* fetch path */}
         {mode === 'fetch' ? (
           <div className="animate-in-up space-y-4">
-            {!providerId ? (
+            {!providerId || (providerId === 'gdrive' && !accountId) ? (
               <>
                 <div>
                   <h2 className="text-sm font-semibold text-fg">
@@ -339,13 +365,23 @@ export default function Decrypt() {
                 <CloudProviderPicker
                   providers={providers}
                   value={providerId}
-                  onSelect={setProviderId}
+                  onSelect={(id) => {
+                    setProviderId(id)
+                    const target = providers.find((p) => p.id === id)
+                    if (id === 'gdrive' && (target?.accounts.length ?? 0) > 0) {
+                      setAccountModalOpen(true)
+                    }
+                  }}
                   onConnect={(id) => {
-                    connectProvider(id, currentUser?.email ?? 'account@company.io')
-                    toast({
-                      tone: 'success',
-                      title: `${providerById(id).name} connected`,
-                    })
+                    try {
+                      connectProvider(id)
+                    } catch (err) {
+                      toast({
+                        tone: 'error',
+                        title: 'Not available yet',
+                        description: err instanceof Error ? err.message : undefined,
+                      })
+                    }
                   }}
                 />
               </>
@@ -353,15 +389,29 @@ export default function Decrypt() {
               <>
                 <div className="flex items-center gap-3">
                   <ProviderIcon id={providerId} size="sm" />
-                  <p className="text-sm font-medium text-fg">
-                    {providerById(providerId).name}
-                  </p>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-fg">
+                      {providerById(providerId).name}
+                    </p>
+                    {providerId === 'gdrive' ? (
+                      <p className="truncate text-[11px] text-fg-subtle">
+                        {provider?.accounts.find((a) => a.id === accountId)?.email}
+                      </p>
+                    ) : null}
+                  </div>
+                  {providerId === 'gdrive' && (provider?.accounts.length ?? 0) > 0 ? (
+                    <Button variant="ghost" size="sm" onClick={() => setAccountModalOpen(true)}>
+                      Change account
+                    </Button>
+                  ) : null}
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => {
                       setProviderId(null)
+                      setAccountId(null)
                       setCloudSelection([])
+                      setCloudSelectionFiles([])
                     }}
                   >
                     Change provider
@@ -371,11 +421,15 @@ export default function Decrypt() {
                 <div className="h-[26rem]">
                   <CloudFileBrowser
                     providerId={providerId}
+                    accountId={accountId}
                     selectable
                     selectionMode="single"
                     onlyEncrypted
                     selectedIds={cloudSelection}
-                    onSelectionChange={setCloudSelection}
+                    onSelectionChange={(ids, files) => {
+                      setCloudSelection(ids)
+                      setCloudSelectionFiles(files)
+                    }}
                     emptyHint="No .hce files in this account yet. Encrypt something first."
                   />
                 </div>
@@ -398,6 +452,35 @@ export default function Decrypt() {
           </div>
         ) : null}
       </PageBody>
+
+      <GoogleAccountPicker
+        open={accountModalOpen}
+        onClose={() => setAccountModalOpen(false)}
+        accounts={provider?.accounts ?? []}
+        selectedId={accountId}
+        onSelect={setAccountId}
+        onConnectAnother={() => {
+          setAccountModalOpen(false)
+          connectProvider('gdrive')
+        }}
+        onDisconnect={async (id) => {
+          setDisconnectingId(id)
+          try {
+            await disconnectProvider('gdrive', id)
+            if (accountId === id) setAccountId(null)
+            toast({ tone: 'info', title: 'Google Drive account disconnected' })
+          } catch (err) {
+            toast({
+              tone: 'error',
+              title: 'Could not disconnect',
+              description: err instanceof Error ? err.message : undefined,
+            })
+          } finally {
+            setDisconnectingId(null)
+          }
+        }}
+        disconnectingId={disconnectingId}
+      />
 
       {/* key prompt */}
       <Modal
@@ -438,7 +521,9 @@ export default function Decrypt() {
           {working ? (
             <div className="flex items-center gap-2 text-xs text-fg-muted">
               <Loader2 className="size-3.5 animate-spin" />
-              Unwrapping the data key and verifying the authentication tag…
+              {workingStage === 'download'
+                ? 'Downloading the encrypted file from Google Drive…'
+                : 'Deriving the key and verifying the authentication tag…'}
             </div>
           ) : null}
 

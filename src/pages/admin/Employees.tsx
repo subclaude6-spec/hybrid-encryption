@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
 import {
   Check,
-  Fingerprint,
+  Copy,
+  KeyRound,
+  Mail,
   Search,
   Shield,
   ShieldX,
-  Smartphone,
   UserPlus,
 } from 'lucide-react'
 import { useApp } from '@/store/AppStore'
@@ -21,17 +22,23 @@ import {
 } from '@/components/ui/primitives'
 import { Modal } from '@/components/ui/Modal'
 import { UserStatusBadge } from '@/components/domain'
+import { ApiRequestError } from '@/lib/api'
 import type { User } from '@/lib/types'
 import { formatDate, timeAgo } from '@/lib/utils'
 
 export default function Employees() {
-  const { users, setUserStatus, visibleLogs } = useApp()
+  const { users, setUserStatus, createEmployee, visibleLogs } = useApp()
   const toast = useToast()
 
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('all')
   const [confirm, setConfirm] = useState<{ user: User; next: User['status'] } | null>(null)
   const [detail, setDetail] = useState<User | null>(null)
+  const [inviting, setInviting] = useState(false)
+  const [applyingStatus, setApplyingStatus] = useState(false)
+  const [created, setCreated] = useState<{ name: string; email: string; password: string } | null>(
+    null,
+  )
 
   const employees = useMemo(() => {
     let list = users.filter((u) => u.role === 'employee')
@@ -48,30 +55,45 @@ export default function Employees() {
     return list
   }, [users, query, status])
 
-  function applyStatusChange() {
+  async function applyStatusChange() {
     if (!confirm) return
-    setUserStatus(confirm.user.id, confirm.next)
-    toast({
-      tone: confirm.next === 'suspended' ? 'warning' : 'success',
-      title:
-        confirm.next === 'suspended'
-          ? `${confirm.user.name}'s access revoked`
-          : `${confirm.user.name} approved`,
-      description:
-        confirm.next === 'suspended'
-          ? 'Their passkeys are rejected at sign-in and existing sessions are terminated.'
-          : 'They can now sign in and encrypt files.',
-    })
-    setConfirm(null)
+    setApplyingStatus(true)
+    try {
+      await setUserStatus(confirm.user.id, confirm.next)
+      toast({
+        tone: confirm.next === 'suspended' ? 'warning' : 'success',
+        title:
+          confirm.next === 'suspended'
+            ? `${confirm.user.name}'s access revoked`
+            : `${confirm.user.name} approved`,
+        description:
+          confirm.next === 'suspended'
+            ? 'Their session is terminated and sign-in (password or Google) is rejected.'
+            : 'They can now sign in and encrypt files.',
+      })
+      setConfirm(null)
+    } catch (err) {
+      toast({
+        tone: 'error',
+        title: 'Could not update status',
+        description: err instanceof ApiRequestError ? err.message : 'Something went wrong.',
+      })
+    } finally {
+      setApplyingStatus(false)
+    }
   }
 
   return (
     <>
       <PageHeader
         title="Employees"
-        subtitle="Approve new accounts, review enrolled passkeys, and revoke access."
+        subtitle="Add new accounts, approve sign-in, and revoke access."
         actions={
-          <Button size="sm" icon={<UserPlus className="size-3.5" />} disabled>
+          <Button
+            size="sm"
+            icon={<UserPlus className="size-3.5" />}
+            onClick={() => setInviting(true)}
+          >
             Invite employee
           </Button>
         }
@@ -117,7 +139,7 @@ export default function Employees() {
                   <tr className="border-b border-ink-700 text-left">
                     <Th>Employee</Th>
                     <Th className="w-44">Department</Th>
-                    <Th className="w-52">Passkeys</Th>
+                    <Th className="w-40">Sign-in</Th>
                     <Th className="w-36">Last active</Th>
                     <Th className="w-36">State</Th>
                     <Th className="w-56">Actions</Th>
@@ -149,27 +171,19 @@ export default function Employees() {
                         {user.department}
                       </td>
                       <td className="px-4 py-3">
-                        {user.passkeys.length === 0 ? (
-                          <Badge tone="warn">None enrolled</Badge>
-                        ) : (
-                          <div className="flex flex-wrap gap-1.5">
-                            {user.passkeys.map((pk) => (
-                              <Badge
-                                key={pk.id}
-                                tone="brand"
-                                icon={
-                                  pk.kind === 'phone' ? (
-                                    <Smartphone className="size-3" />
-                                  ) : (
-                                    <Fingerprint className="size-3" />
-                                  )
-                                }
-                              >
-                                {pk.label}
-                              </Badge>
-                            ))}
-                          </div>
-                        )}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {user.authProvider !== 'google' ? (
+                            <Badge tone="brand" icon={<KeyRound className="size-3" />}>
+                              Password
+                            </Badge>
+                          ) : null}
+                          {user.authProvider !== 'password' ? (
+                            <Badge tone="brand" icon={<Mail className="size-3" />}>
+                              Google
+                            </Badge>
+                          ) : null}
+                          {user.locked ? <Badge tone="warn">Locked</Badge> : null}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-xs text-fg-muted">
                         {user.lastActiveAt ? timeAgo(user.lastActiveAt) : '—'}
@@ -241,6 +255,7 @@ export default function Employees() {
             </Button>
             <Button
               variant={confirm?.next === 'suspended' ? 'danger' : 'primary'}
+              loading={applyingStatus}
               onClick={applyStatusChange}
             >
               {confirm?.next === 'suspended' ? 'Revoke access' : 'Approve'}
@@ -259,8 +274,8 @@ export default function Employees() {
             </div>
             <p className="text-xs leading-relaxed text-fg-muted">
               {confirm.next === 'suspended'
-                ? 'Their enrolled passkeys will be rejected at sign-in and any active session ends immediately. Files they already encrypted stay in the cloud — this only removes their ability to decrypt through the app.'
-                : 'They will be able to sign in with their passkey, encrypt files to connected providers, and decrypt anything issued to them.'}
+                ? 'Their password and Google sign-in are rejected and any active session ends immediately. Files they already encrypted stay in the cloud — this only removes their ability to decrypt through the app.'
+                : 'They will be able to sign in with their password or Google account, encrypt files to connected providers, and decrypt anything issued to them.'}
             </p>
           </div>
         ) : null}
@@ -288,36 +303,26 @@ export default function Employees() {
             </div>
 
             <div>
-              <p className="mb-2 text-xs font-medium text-fg-muted">Enrolled passkeys</p>
-              {detail.passkeys.length === 0 ? (
-                <p className="rounded-xl border border-warn/25 bg-warn/[0.07] px-3.5 py-3 text-xs text-warn">
-                  No passkey enrolled yet — this account cannot sign in.
+              <p className="mb-2 text-xs font-medium text-fg-muted">Sign-in</p>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {detail.authProvider !== 'google' ? (
+                  <Badge tone="brand" icon={<KeyRound className="size-3" />}>
+                    Password
+                  </Badge>
+                ) : null}
+                {detail.authProvider !== 'password' ? (
+                  <Badge tone="brand" icon={<Mail className="size-3" />}>
+                    Google
+                  </Badge>
+                ) : null}
+                {detail.locked ? <Badge tone="warn">Locked out</Badge> : null}
+              </div>
+              {detail.authProvider === 'password' ? (
+                <p className="mt-2 text-[11px] leading-relaxed text-fg-subtle">
+                  Signing in with the same email through Google will link that account
+                  automatically, as long as this account is active.
                 </p>
-              ) : (
-                <ul className="space-y-2">
-                  {detail.passkeys.map((pk) => (
-                    <li
-                      key={pk.id}
-                      className="flex items-center gap-3 rounded-xl border border-ink-700 bg-ink-900 px-3.5 py-3"
-                    >
-                      {pk.kind === 'phone' ? (
-                        <Smartphone className="size-4 shrink-0 text-brand-400" />
-                      ) : (
-                        <Fingerprint className="size-4 shrink-0 text-brand-400" />
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-xs font-medium text-fg">{pk.label}</p>
-                        <p className="truncate text-[11px] text-fg-subtle">
-                          {pk.authenticator}
-                        </p>
-                      </div>
-                      <span className="shrink-0 text-[11px] text-fg-subtle">
-                        {pk.lastUsedAt ? timeAgo(pk.lastUsedAt) : 'unused'}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              ) : null}
             </div>
 
             <div>
@@ -338,7 +343,170 @@ export default function Employees() {
           </div>
         ) : null}
       </Modal>
+
+      <InviteEmployeeModal
+        open={inviting}
+        onClose={() => setInviting(false)}
+        onCreated={(name, email, password) => {
+          setInviting(false)
+          setCreated({ name, email, password })
+        }}
+        createEmployee={createEmployee}
+        toast={toast}
+      />
+
+      {/* invite result */}
+      <Modal
+        open={created !== null}
+        onClose={() => setCreated(null)}
+        title="Employee added"
+        icon={<Check className="size-5" />}
+        size="sm"
+        footer={<Button onClick={() => setCreated(null)}>Done</Button>}
+      >
+        {created ? (
+          <div className="space-y-4">
+            <p className="text-xs leading-relaxed text-fg-muted">
+              <span className="text-fg">{created.name}</span> can sign in now — either with the
+              temporary password below, or with{' '}
+              <span className="text-fg">Continue with Google</span> at the login page using a
+              Google account that matches <span className="text-fg">{created.email}</span>. The
+              first Google sign-in links their account automatically.
+            </p>
+            <div>
+              <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-fg-subtle">
+                Temporary password
+              </p>
+              <div className="flex items-center gap-2 rounded-xl border border-ink-700 bg-ink-900 px-3.5 py-2.5">
+                <code className="flex-1 truncate text-sm text-fg">{created.password}</code>
+                <button
+                  type="button"
+                  onClick={() => navigator.clipboard.writeText(created.password)}
+                  aria-label="Copy password"
+                  className="rounded-lg p-1.5 text-fg-subtle transition-colors hover:bg-ink-700 hover:text-fg"
+                >
+                  <Copy className="size-3.5" />
+                </button>
+              </div>
+              <p className="mt-1.5 text-[11px] text-fg-subtle">
+                Shown once — pass it on securely. They'll be asked to change it on first sign-in.
+              </p>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </>
+  )
+}
+
+function InviteEmployeeModal({
+  open,
+  onClose,
+  onCreated,
+  createEmployee,
+  toast,
+}: {
+  open: boolean
+  onClose: () => void
+  onCreated: (name: string, email: string, password: string) => void
+  createEmployee: (input: {
+    name: string
+    email: string
+    department: string
+  }) => Promise<{ user: User; temporaryPassword: string }>
+  toast: ReturnType<typeof useToast>
+}) {
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [department, setDepartment] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  function reset() {
+    setName('')
+    setEmail('')
+    setDepartment('')
+  }
+
+  async function submit() {
+    if (!name.trim() || !email.trim()) return
+    setSubmitting(true)
+    try {
+      const { user, temporaryPassword } = await createEmployee({
+        name: name.trim(),
+        email: email.trim(),
+        department: department.trim() || 'Unassigned',
+      })
+      onCreated(user.name, user.email, temporaryPassword)
+      reset()
+    } catch (err) {
+      toast({
+        tone: 'error',
+        title: 'Could not add employee',
+        description: err instanceof ApiRequestError ? err.message : 'Something went wrong.',
+      })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => {
+        reset()
+        onClose()
+      }}
+      title="Invite employee"
+      subtitle="Added accounts are active immediately — no separate approval step needed."
+      icon={<UserPlus className="size-5" />}
+      size="sm"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            loading={submitting}
+            disabled={!name.trim() || !email.trim()}
+            onClick={submit}
+          >
+            Add employee
+          </Button>
+        </>
+      }
+    >
+      <form
+        className="space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault()
+          submit()
+        }}
+      >
+        <Input
+          label="Full name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Priya Sharma"
+          autoFocus
+        />
+        <Input
+          label="Email"
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="priya.sharma@company.io"
+        />
+        <p className="-mt-2 text-[11px] leading-relaxed text-fg-subtle">
+          This must match the Google account they'll sign in with, if they use Google.
+        </p>
+        <Input
+          label="Department"
+          value={department}
+          onChange={(e) => setDepartment(e.target.value)}
+          placeholder="Finance"
+        />
+      </form>
+    </Modal>
   )
 }
 

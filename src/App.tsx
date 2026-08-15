@@ -64,6 +64,8 @@ export default function App() {
           <Route element={<RequireRole role="admin" />}>
             <Route path="/admin" element={<AdminOverview />} />
             <Route path="/admin/employees" element={<Employees />} />
+            <Route path="/admin/upload" element={<Upload />} />
+            <Route path="/admin/decrypt" element={<Decrypt />} />
             <Route path="/admin/vault" element={<AdminVault />} />
             <Route path="/admin/logs" element={<AuditLog />} />
             <Route path="/admin/alerts" element={<Alerts />} />

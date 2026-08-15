@@ -1,17 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
-import {
-  AlertTriangle,
-  Eye,
-  EyeOff,
-  KeyRound,
-  Loader2,
-  Lock,
-  LogIn,
-  Mail,
-  ShieldCheck,
-  Sparkles,
-} from 'lucide-react'
+import { AlertTriangle, Eye, EyeOff, Loader2, Lock, LogIn, Mail, ShieldCheck } from 'lucide-react'
 import { useApp } from '@/store/AppStore'
 import {
   describeAuthError,
@@ -19,7 +8,8 @@ import {
   signInWithPassword,
   startGoogleSignIn,
 } from '@/lib/auth'
-import { Badge, Button, Input } from '@/components/ui/primitives'
+import { Button, Input } from '@/components/ui/primitives'
+import LightRays from '@/components/LightRays'
 
 export default function Login() {
   const navigate = useNavigate()
@@ -81,23 +71,39 @@ export default function Login() {
   }
 
   return (
-    <div className="grid h-full grid-cols-1 lg:grid-cols-[1.05fr_1fr]">
-      <BrandPanel />
+    <div className="relative flex h-full items-center justify-center overflow-y-auto bg-ink-950 px-6 py-10">
+      <div className="pointer-events-none absolute inset-0 z-0">
+        <LightRays
+          raysOrigin="top-center"
+          raysColor="#06b6d4"
+          raysSpeed={1.2}
+          lightSpread={0.75}
+          rayLength={1.4}
+          followMouse
+          mouseInfluence={0.12}
+          noiseAmount={0.08}
+          distortion={0.04}
+          saturation={1}
+          fadeDistance={1.1}
+        />
+      </div>
 
-      <div className="relative flex items-center justify-center overflow-y-auto bg-ink-950 px-6 py-10">
-        <div className="w-full max-w-sm">
-          <div className="animate-in-up">
-            <div className="mb-7 lg:hidden">
-              <span className="flex size-10 items-center justify-center rounded-xl bg-brand-500 text-ink-950">
-                <ShieldCheck className="size-5" strokeWidth={2.4} />
-              </span>
-            </div>
+      <div className="relative z-10 w-full max-w-sm">
+        <div className="animate-in-up rounded-2xl border border-ink-800 bg-ink-900 p-8 shadow-xl">
+          <div className="mb-7 flex justify-center">
+            <span className="flex size-10 items-center justify-center rounded-xl bg-brand-500 text-ink-onbrand">
+              <ShieldCheck className="size-5" strokeWidth={2.4} />
+            </span>
+          </div>
 
+          <div className="text-center">
             <h2 className="text-2xl font-semibold tracking-tight text-fg">Sign in</h2>
             <p className="mt-1.5 text-sm text-fg-muted">
               Use the account your administrator provisioned for you.
             </p>
+          </div>
 
+          <div className="mt-5">
             {error ? (
               <div className="mt-5 flex items-start gap-2.5 rounded-xl border border-danger/25 bg-danger/[0.07] px-3.5 py-3">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" />
@@ -211,74 +217,5 @@ function GoogleMark() {
         d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0A12 12 0 0 0 1.28 6.62l3.99 3.09C6.22 6.86 8.87 4.75 12 4.75Z"
       />
     </svg>
-  )
-}
-
-/* ----------------------------------------------------------- brand panel */
-
-function BrandPanel() {
-  const points = [
-    { icon: Lock, text: 'AES-256-GCM encryption runs in your browser, before upload' },
-    { icon: KeyRound, text: 'Per-file keys derived with PBKDF2 — the server stores none of them' },
-    { icon: ShieldCheck, text: 'Tamper-evident audit log across every account' },
-  ]
-
-  return (
-    <div className="relative hidden overflow-hidden border-r border-ink-800 bg-ink-900 lg:flex lg:flex-col lg:justify-between lg:p-12">
-      <div
-        className="pointer-events-none absolute inset-0 opacity-[0.35]"
-        style={{
-          backgroundImage:
-            'linear-gradient(to right, #16202f 1px, transparent 1px), linear-gradient(to bottom, #16202f 1px, transparent 1px)',
-          backgroundSize: '44px 44px',
-          maskImage: 'radial-gradient(ellipse at 30% 40%, black, transparent 72%)',
-        }}
-      />
-      <div
-        className="pointer-events-none absolute -left-24 top-1/3 size-[420px] rounded-full opacity-25 blur-[100px]"
-        style={{ background: 'radial-gradient(circle, #06b6d4, transparent 65%)' }}
-      />
-
-      <div className="relative flex items-center gap-2.5">
-        <span className="flex size-9 items-center justify-center rounded-xl bg-brand-500 text-ink-950">
-          <ShieldCheck className="size-5" strokeWidth={2.4} />
-        </span>
-        <span className="text-sm font-semibold tracking-tight text-fg">
-          Hybrid Cloud Encryption
-        </span>
-      </div>
-
-      <div className="relative max-w-md">
-        <Badge tone="brand" icon={<Sparkles className="size-3" />}>
-          Zero-knowledge by design
-        </Badge>
-        <h1 className="mt-5 text-4xl font-semibold leading-[1.12] tracking-tight text-fg">
-          Your files stay yours,
-          <br />
-          even on someone
-          <br />
-          else&rsquo;s cloud.
-        </h1>
-        <p className="mt-4 text-sm leading-relaxed text-fg-muted">
-          Encrypt before you upload to Google Drive, GitHub or Dropbox. The provider
-          stores ciphertext it can never read — and neither can we.
-        </p>
-
-        <ul className="mt-8 space-y-3.5">
-          {points.map(({ icon: Icon, text }) => (
-            <li key={text} className="flex items-start gap-3">
-              <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-lg bg-brand-500/12 text-brand-400">
-                <Icon className="size-3.5" />
-              </span>
-              <span className="text-sm leading-relaxed text-fg-muted">{text}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <p className="relative text-xs text-fg-subtle">
-        Build 0.1.0 · Encryption and audit log live · cloud providers next
-      </p>
-    </div>
   )
 }

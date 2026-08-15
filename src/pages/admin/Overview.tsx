@@ -138,11 +138,15 @@ export default function AdminOverview() {
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm text-fg">{provider.name}</p>
                     <p className="truncate text-[11px] text-fg-subtle">
-                      {provider.connected ? provider.account : provider.blurb}
+                      {provider.connected
+                        ? provider.accounts.map((a) => a.email).join(', ')
+                        : provider.blurb}
                     </p>
                   </div>
                   {provider.connected ? (
-                    <Badge tone="ok">Linked</Badge>
+                    <Badge tone="ok">
+                      {provider.accounts.length} linked
+                    </Badge>
                   ) : (
                     <Badge tone="neutral">Not linked</Badge>
                   )}

@@ -7,11 +7,17 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { fetchSession, signOut as signOutRequest } from '@/lib/auth'
+import { fetchSession, signOut as signOutRequest, toAppUser, type ApiUser } from '@/lib/auth'
+import { api } from '@/lib/api'
+import {
+  disconnectGoogleDrive,
+  fetchProviders,
+  startGoogleDriveConnect,
+} from '@/lib/providers'
+import { connectSocket, disconnectSocket } from '@/lib/socket'
 import {
   ALERTS,
   LOGS,
-  PROVIDERS,
   USERS,
   VAULT_FILES,
   providerById,
@@ -27,13 +33,6 @@ import type {
   VaultFile,
 } from '@/lib/types'
 import { mockKey, shortId } from '@/lib/utils'
-
-/** Every vault file in the mock set decrypts with its own keyId. This mirrors the
- *  real check the crypto layer will do later: unwrap the DEK, then let AES-GCM's
- *  auth tag reject a wrong key. */
-export function keyMatches(file: VaultFile, submitted: string): boolean {
-  return submitted.trim().toUpperCase() === file.keyId.toUpperCase()
-}
 
 interface AppContextValue {
   currentUser: User | null
@@ -67,7 +66,8 @@ interface AppContextValue {
   }) => { key: string; files: VaultFile[] }
 
   recordDecryption: (args: {
-    file: VaultFile
+    fileName: string
+    providerId: ProviderId | null
     success: boolean
     attempt: number
   }) => void
@@ -75,9 +75,17 @@ interface AppContextValue {
   raiseAlert: (alert: Omit<SecurityAlert, 'id' | 'at' | 'resolved'>) => void
   resolveAlert: (id: string) => void
 
-  setUserStatus: (userId: string, status: User['status']) => void
-  connectProvider: (id: ProviderId, account: string) => void
-  disconnectProvider: (id: ProviderId) => void
+  setUserStatus: (userId: string, status: User['status']) => Promise<void>
+  refreshUsers: () => Promise<void>
+  createEmployee: (input: {
+    name: string
+    email: string
+    department: string
+  }) => Promise<{ user: User; temporaryPassword: string }>
+  refreshProviders: () => Promise<void>
+  /** Google Drive redirects the whole page; other providers aren't wired up yet. */
+  connectProvider: (id: ProviderId) => void
+  disconnectProvider: (id: ProviderId, accountId: string) => Promise<void>
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -104,7 +112,47 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       cancelled = true
     }
   }, [])
-  const [providers, setProviders] = useState<CloudProvider[]>(PROVIDERS)
+
+  const refreshUsers = useCallback(async () => {
+    const { users: apiUsers } = await api.get<{ users: ApiUser[] }>('/users')
+    setUsers(apiUsers.map(toAppUser))
+  }, [])
+
+  // Admins manage real accounts — load them from the database instead of
+  // the frontend's mock roster as soon as an admin session is known.
+  useEffect(() => {
+    if (currentUser?.role === 'admin') {
+      refreshUsers().catch(() => {
+        // Left showing whatever was there before — the Employees page surfaces its own errors.
+      })
+    }
+  }, [currentUser, refreshUsers])
+
+  const [providers, setProviders] = useState<CloudProvider[]>([])
+
+  const refreshProviders = useCallback(async () => {
+    setProviders(await fetchProviders())
+  }, [])
+
+  // Every signed-in role needs to know what's actually connected — this isn't
+  // admin-only like the user roster.
+  useEffect(() => {
+    if (currentUser) {
+      refreshProviders().catch(() => {
+        // Left showing whatever was there before — Upload/Decrypt surface their own errors.
+      })
+    }
+  }, [currentUser, refreshProviders])
+
+  // Realtime channel mirrors the session: connect once someone's signed in,
+  // drop it the moment they're not so a stale socket never lingers.
+  useEffect(() => {
+    if (currentUser) {
+      connectSocket()
+      return () => disconnectSocket()
+    }
+    return undefined
+  }, [currentUser])
   const [vaultFiles, setVaultFiles] = useState<VaultFile[]>(VAULT_FILES)
   const [logs, setLogs] = useState<LogEntry[]>(LOGS)
   const [alerts, setAlerts] = useState<SecurityAlert[]>(ALERTS)
@@ -230,16 +278,23 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   )
 
   const recordDecryption = useCallback(
-    ({ file, success, attempt }: { file: VaultFile; success: boolean; attempt: number }) => {
+    ({
+      fileName,
+      providerId,
+      success,
+      attempt,
+    }: {
+      fileName: string
+      providerId: ProviderId | null
+      success: boolean
+      attempt: number
+    }) => {
       if (success) {
-        setVaultFiles((prev) =>
-          prev.map((f) => (f.id === file.id ? { ...f, status: 'decrypted' } : f)),
-        )
         pushLog({
           action: 'decrypt_success',
           status: 'success',
-          detail: `${file.encryptedName} decrypted and downloaded`,
-          providerId: file.providerId,
+          detail: `${fileName} decrypted and downloaded`,
+          providerId,
         })
         return
       }
@@ -247,15 +302,15 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       pushLog({
         action: 'decrypt_failed',
         status: 'failed',
-        detail: `Invalid decryption key — attempt ${attempt} of 3 on ${file.encryptedName}`,
-        providerId: file.providerId,
+        detail: `Invalid decryption key — attempt ${attempt} of 3 on ${fileName}`,
+        providerId,
       })
 
       if (attempt >= 3 && currentUser) {
         raiseAlert({
           severity: 'critical',
           title: 'Repeated invalid decryption key',
-          detail: `${currentUser.name} submitted 3 consecutive invalid keys for ${file.encryptedName}. Admin has been notified by email.`,
+          detail: `${currentUser.name} submitted 3 consecutive invalid keys for ${fileName}. Admin has been notified by email.`,
           userId: currentUser.id,
           userName: currentUser.name,
           attempts: attempt,
@@ -270,43 +325,50 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const setUserStatus = useCallback(
-    (userId: string, status: User['status']) => {
-      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, status } : u)))
-      const target = users.find((u) => u.id === userId)
-      if (target) {
-        pushLog({
-          action: status === 'suspended' ? 'access_revoked' : 'account_created',
-          status: status === 'suspended' ? 'warning' : 'success',
-          detail:
-            status === 'suspended'
-              ? `Suspended ${target.name} — credentials revoked`
-              : `${target.name} approved as ${target.role}`,
-        })
-      }
-    },
-    [pushLog, users],
-  )
-
-  const connectProvider = useCallback(
-    (id: ProviderId, account: string) => {
-      setProviders((prev) =>
-        prev.map((p) => (p.id === id ? { ...p, connected: true, account } : p)),
+    async (userId: string, status: User['status']) => {
+      const { user: updated } = await api.patch<{ user: ApiUser }>(
+        `/users/${userId}/status`,
+        { status },
       )
-      pushLog({
-        action: 'provider_connected',
-        status: 'success',
-        detail: `${providerById(id).name} account ${account} linked`,
-        providerId: id,
-      })
+      const applied = toAppUser(updated)
+      setUsers((prev) => prev.map((u) => (u.id === userId ? applied : u)))
+      // The server records its own audit-log entry for this change, so this
+      // only needs to update local state — no local pushLog here.
     },
-    [pushLog],
+    [],
   )
 
-  const disconnectProvider = useCallback((id: ProviderId) => {
-    setProviders((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, connected: false, account: null } : p)),
-    )
+  const createEmployee = useCallback(
+    async (input: { name: string; email: string; department: string }) => {
+      const { user: created, temporaryPassword } = await api.post<{
+        user: ApiUser
+        temporaryPassword: string
+      }>('/users', { ...input, role: 'employee' })
+      const applied = toAppUser(created)
+      setUsers((prev) => [...prev, applied])
+      return { user: applied, temporaryPassword }
+    },
+    [],
+  )
+
+  const connectProvider = useCallback((id: ProviderId) => {
+    if (id === 'gdrive') {
+      startGoogleDriveConnect()
+      return
+    }
+    throw new Error(`${providerById(id).name} isn't wired up yet — Google Drive is the only live provider.`)
   }, [])
+
+  const disconnectProvider = useCallback(
+    async (id: ProviderId, accountId: string) => {
+      if (id !== 'gdrive') {
+        throw new Error(`${providerById(id).name} isn't wired up yet.`)
+      }
+      await disconnectGoogleDrive(accountId)
+      await refreshProviders()
+    },
+    [refreshProviders],
+  )
 
   const value = useMemo<AppContextValue>(
     () => ({
@@ -327,6 +389,9 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       raiseAlert,
       resolveAlert,
       setUserStatus,
+      refreshUsers,
+      createEmployee,
+      refreshProviders,
       connectProvider,
       disconnectProvider,
     }),
@@ -348,6 +413,9 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       raiseAlert,
       resolveAlert,
       setUserStatus,
+      refreshUsers,
+      createEmployee,
+      refreshProviders,
       connectProvider,
       disconnectProvider,
     ],

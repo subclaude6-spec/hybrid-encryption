@@ -34,9 +34,13 @@ router.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const user = req.currentUser!
-    const connected = new Map(
-      user.providerAccounts.map((account) => [account.provider, account]),
-    )
+    const gdriveAccounts = user.providerAccounts
+      .filter((account) => account.provider === 'gdrive')
+      .map((account) => ({
+        id: String(account._id),
+        email: account.accountEmail,
+        connectedAt: account.connectedAt,
+      }))
 
     res.json({
       providers: [
@@ -44,14 +48,12 @@ router.get(
           id: 'gdrive',
           name: 'Google Drive',
           available: features.googleDrive,
-          connected: connected.has('gdrive'),
-          account: connected.get('gdrive')?.accountEmail ?? null,
-          connectedAt: connected.get('gdrive')?.connectedAt ?? null,
+          accounts: gdriveAccounts,
         },
-        { id: 'github', name: 'GitHub', available: false, connected: false, account: null },
-        { id: 'dropbox', name: 'Dropbox', available: false, connected: false, account: null },
-        { id: 'onedrive', name: 'OneDrive', available: false, connected: false, account: null },
-        { id: 'mega', name: 'MEGA', available: false, connected: false, account: null },
+        { id: 'github', name: 'GitHub', available: false, accounts: [] },
+        { id: 'dropbox', name: 'Dropbox', available: false, accounts: [] },
+        { id: 'onedrive', name: 'OneDrive', available: false, accounts: [] },
+        { id: 'mega', name: 'MEGA', available: false, accounts: [] },
       ],
     })
   }),
@@ -101,8 +103,13 @@ router.get(
     const user = await User.findById(req.session.userId)
     if (!user) return res.redirect(backToApp('/login', { error: 'session_expired' }))
 
+    // Sent back into whichever role's upload page the user started from, so
+    // an admin connecting a Drive account from /admin/upload doesn't land on
+    // the employee route (which their session isn't allowed into).
+    const returnPath = user.role === 'admin' ? '/admin/upload' : '/app/upload'
+
     try {
-      const accountEmail = await exchangeCode(code, user)
+      const { accountId, accountEmail } = await exchangeCode(code, user)
       await recordLog({
         user,
         action: 'provider_connected',
@@ -112,11 +119,16 @@ router.get(
         req,
       })
       return res.redirect(
-        backToApp('/app/upload', { provider: 'gdrive', connected: '1', account: accountEmail }),
+        backToApp(returnPath, {
+          provider: 'gdrive',
+          connected: '1',
+          account: accountEmail,
+          accountId,
+        }),
       )
     } catch (exchangeError) {
       return res.redirect(
-        backToApp('/app/upload', {
+        backToApp(returnPath, {
           provider: 'gdrive',
           error: (exchangeError as Error).message.slice(0, 200),
         }),
@@ -126,10 +138,11 @@ router.get(
 )
 
 router.delete(
-  '/google',
+  '/google/:accountId',
   requireAuth,
   asyncHandler(async (req, res) => {
-    await disconnect(String(req.currentUser!._id))
+    const accountId = z.string().min(1).parse(req.params.accountId)
+    await disconnect(String(req.currentUser!._id), accountId)
     res.json({ ok: true })
   }),
 )
@@ -141,6 +154,7 @@ router.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const schema = z.object({
+      accountId: z.string().min(1),
       search: z.string().optional(),
       onlyEncrypted: z.enum(['0', '1']).optional(),
       pageToken: z.string().optional(),
@@ -149,6 +163,7 @@ router.get(
 
     const result = await listFiles({
       userId: String(req.currentUser!._id),
+      accountId: query.accountId,
       search: query.search,
       onlyEncrypted: query.onlyEncrypted === '1',
       pageToken: query.pageToken,
@@ -161,6 +176,7 @@ router.get(
 /* -------------------------------------------------------------- upload */
 
 const uploadMetaSchema = z.object({
+  accountId: z.string().min(1),
   name: z.string().min(1),
   originalName: z.string().min(1),
   keyId: z.string().min(1),
@@ -185,6 +201,7 @@ router.post(
 
     const uploaded = await uploadEncrypted({
       userId: String(user._id),
+      accountId: meta.accountId,
       name: meta.name,
       body: req,
     })
@@ -195,6 +212,8 @@ router.post(
       sizeBytes: uploaded.sizeBytes || meta.originalSize,
       mimeType: meta.mimeType,
       provider: 'gdrive',
+      providerAccountId: meta.accountId,
+      providerAccountEmail: uploaded.accountEmail,
       providerFileId: uploaded.fileId,
       providerWebLink: uploaded.webViewLink,
       owner: user._id,
@@ -208,7 +227,7 @@ router.post(
       user,
       action: 'encrypt_upload',
       status: 'success',
-      detail: `${meta.originalName} encrypted (AES-256-GCM) and uploaded to Google Drive`,
+      detail: `${meta.originalName} encrypted (AES-256-GCM) and uploaded to Google Drive (${uploaded.accountEmail})`,
       provider: 'gdrive',
       req,
     })
@@ -226,8 +245,9 @@ router.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const fileId = z.string().min(1).parse(req.params.fileId)
+    const accountId = z.string().min(1).parse(req.query.accountId)
 
-    const file = await downloadFile(String(req.currentUser!._id), fileId)
+    const file = await downloadFile(String(req.currentUser!._id), accountId, fileId)
 
     res.setHeader('Content-Type', 'application/octet-stream')
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`)
@@ -256,7 +276,15 @@ router.delete(
       throw ApiError.forbidden('You can only delete your own files.')
     }
 
-    await deleteFile(userId, fileId)
+    // A vault record already knows which of the owner's accounts holds it.
+    // Falling back to the query param covers deleting a raw Drive listing
+    // entry that was never turned into a vault record.
+    const accountId =
+      record?.providerAccountId != null
+        ? String(record.providerAccountId)
+        : z.string().min(1).parse(req.query.accountId)
+
+    await deleteFile(userId, accountId, fileId)
     if (record) await record.deleteOne()
 
     res.json({ ok: true })

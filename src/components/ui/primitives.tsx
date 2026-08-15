@@ -9,7 +9,7 @@ type ButtonSize = 'sm' | 'md' | 'lg'
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    'bg-brand-500 text-ink-950 font-semibold hover:bg-brand-400 active:bg-brand-600 shadow-lg shadow-brand-500/20',
+    'bg-brand-500 text-ink-onbrand font-semibold hover:bg-brand-600 active:bg-brand-700 shadow-sm shadow-brand-500/25',
   secondary: 'bg-ink-700 text-fg hover:bg-ink-600 border border-ink-600',
   ghost: 'text-fg-muted hover:text-fg hover:bg-ink-800',
   danger: 'bg-danger/15 text-danger border border-danger/30 hover:bg-danger/25',
@@ -72,9 +72,9 @@ export function Card({
   return (
     <div
       className={cn(
-        'rounded-xl2 border border-ink-700 bg-ink-850',
+        'rounded-xl2 border border-ink-700 bg-ink-850 shadow-sm shadow-ink-600/5',
         interactive &&
-          'transition-all duration-200 hover:border-ink-600 hover:bg-ink-800 cursor-pointer',
+          'transition-all duration-200 hover:border-ink-600 hover:bg-ink-800 hover:shadow-md hover:shadow-ink-600/10 cursor-pointer',
         className,
       )}
     >

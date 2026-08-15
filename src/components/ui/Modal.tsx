@@ -47,14 +47,14 @@ export function Modal({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       <div
-        className="animate-fade absolute inset-0 bg-ink-950/80 backdrop-blur-sm"
+        className="animate-fade absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
         onClick={dismissable ? onClose : undefined}
       />
       <div
         role="dialog"
         aria-modal="true"
         className={cn(
-          'animate-in-up relative flex max-h-[85vh] w-full flex-col overflow-hidden rounded-xl2 border border-ink-700 bg-ink-850 shadow-2xl shadow-ink-950/60',
+          'animate-in-up relative flex max-h-[85vh] w-full flex-col overflow-hidden rounded-xl2 border border-ink-700 bg-ink-850 shadow-2xl shadow-slate-900/15',
           SIZES[size],
         )}
       >

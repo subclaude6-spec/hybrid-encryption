@@ -1,20 +1,36 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   ChevronRight,
   FileLock2,
   FileText,
   Folder,
+  Loader2,
   RefreshCw,
   Search,
 } from 'lucide-react'
 import type { CloudFile, ProviderId } from '@/lib/types'
 import { CLOUD_FILES, providerById } from '@/lib/mock-data'
+import { type DriveFileSummary, fetchDriveFiles } from '@/lib/providers'
+import { ApiRequestError } from '@/lib/api'
 import { cn, formatBytes, timeAgo } from '@/lib/utils'
 import { Badge, EmptyState, Input } from './ui/primitives'
 import { ProviderIcon } from './domain'
 
+function driveFileToCloudFile(providerId: ProviderId, file: DriveFileSummary): CloudFile {
+  return {
+    id: file.id,
+    name: file.name,
+    sizeBytes: file.sizeBytes,
+    modifiedAt: file.modifiedAt,
+    kind: 'file',
+    providerId,
+    encrypted: file.encrypted,
+  }
+}
+
 export function CloudFileBrowser({
   providerId,
+  accountId,
   selectable = false,
   selectionMode = 'multiple',
   onlyEncrypted = false,
@@ -23,29 +39,68 @@ export function CloudFileBrowser({
   emptyHint,
 }: {
   providerId: ProviderId
+  /** Which of the user's connected accounts to browse. Required once the
+   *  provider is live (gdrive) — ignored for the still-mocked providers. */
+  accountId?: string | null
   selectable?: boolean
   selectionMode?: 'single' | 'multiple'
   onlyEncrypted?: boolean
   selectedIds?: string[]
-  onSelectionChange?: (ids: string[]) => void
+  /** `files` is the full metadata for whatever `ids` now contains — callers
+   *  that need more than the id (name, size) don't have to re-fetch it. */
+  onSelectionChange?: (ids: string[], files: CloudFile[]) => void
   emptyHint?: string
 }) {
   const [query, setQuery] = useState('')
   const [folder, setFolder] = useState<string | null>(null)
   const provider = providerById(providerId)
+  const isLive = providerId === 'gdrive' && Boolean(accountId)
+
+  const [driveFiles, setDriveFiles] = useState<CloudFile[]>([])
+  const [loading, setLoading] = useState(isLive)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [refreshTick, setRefreshTick] = useState(0)
+
+  useEffect(() => {
+    if (!isLive || !accountId) return
+    let cancelled = false
+    setLoading(true)
+    setLoadError(null)
+    // Debounced — a query fires a request per keystroke otherwise.
+    const timer = setTimeout(() => {
+      fetchDriveFiles({ accountId, search: query, onlyEncrypted })
+        .then(({ files: result }) => {
+          if (cancelled) return
+          setDriveFiles(result.map((f) => driveFileToCloudFile(providerId, f)))
+        })
+        .catch((err) => {
+          if (cancelled) return
+          setLoadError(err instanceof ApiRequestError ? err.message : 'Could not load Google Drive files.')
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [isLive, providerId, accountId, onlyEncrypted, query, refreshTick])
 
   const files = useMemo(() => {
-    let list: CloudFile[] = CLOUD_FILES[providerId] ?? []
-    if (onlyEncrypted) list = list.filter((f) => f.kind === 'folder' || f.encrypted)
-    if (query.trim()) {
-      const q = query.toLowerCase()
-      list = list.filter((f) => f.name.toLowerCase().includes(q))
+    let list: CloudFile[] = isLive ? driveFiles : CLOUD_FILES[providerId] ?? []
+    if (!isLive) {
+      if (onlyEncrypted) list = list.filter((f) => f.kind === 'folder' || f.encrypted)
+      if (query.trim()) {
+        const q = query.toLowerCase()
+        list = list.filter((f) => f.name.toLowerCase().includes(q))
+      }
     }
     return [...list].sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1
       return a.name.localeCompare(b.name)
     })
-  }, [providerId, onlyEncrypted, query])
+  }, [isLive, driveFiles, providerId, onlyEncrypted, query])
 
   function toggle(file: CloudFile) {
     if (file.kind === 'folder') {
@@ -54,13 +109,16 @@ export function CloudFileBrowser({
     }
     if (!selectable || !onSelectionChange) return
     if (selectionMode === 'single') {
-      onSelectionChange(selectedIds.includes(file.id) ? [] : [file.id])
+      const nowSelected = selectedIds.includes(file.id) ? [] : [file.id]
+      onSelectionChange(nowSelected, nowSelected.length ? [file] : [])
       return
     }
+    const nowSelected = selectedIds.includes(file.id)
+      ? selectedIds.filter((id) => id !== file.id)
+      : [...selectedIds, file.id]
     onSelectionChange(
-      selectedIds.includes(file.id)
-        ? selectedIds.filter((id) => id !== file.id)
-        : [...selectedIds, file.id],
+      nowSelected,
+      files.filter((f) => nowSelected.includes(f.id)),
     )
   }
 
@@ -98,18 +156,29 @@ export function CloudFileBrowser({
             />
           </div>
           <button
-            onClick={() => setQuery('')}
+            onClick={() => (isLive ? setRefreshTick((t) => t + 1) : setQuery(''))}
             aria-label="Refresh listing"
             className="rounded-lg border border-ink-700 p-2 text-fg-subtle transition-colors hover:border-ink-600 hover:text-fg"
           >
-            <RefreshCw className="size-3.5" />
+            <RefreshCw className={cn('size-3.5', isLive && loading && 'animate-spin')} />
           </button>
         </div>
       </div>
 
       {/* listing */}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {files.length === 0 ? (
+        {isLive && loading && files.length === 0 ? (
+          <div className="flex h-full items-center justify-center gap-2 text-xs text-fg-muted">
+            <Loader2 className="size-4 animate-spin" />
+            Loading Google Drive…
+          </div>
+        ) : isLive && loadError ? (
+          <EmptyState
+            icon={<Folder className="size-5" />}
+            title="Couldn't load Google Drive"
+            description={loadError}
+          />
+        ) : files.length === 0 ? (
           <EmptyState
             icon={<Folder className="size-5" />}
             title="Nothing here"
@@ -144,7 +213,7 @@ export function CloudFileBrowser({
                         )}
                       >
                         {selected ? (
-                          <span className="size-1.5 rounded-full bg-ink-950" />
+                          <span className="size-1.5 rounded-full bg-ink-onbrand" />
                         ) : null}
                       </span>
                     ) : (

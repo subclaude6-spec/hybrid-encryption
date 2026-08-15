@@ -23,12 +23,20 @@ export interface User {
 
 export type ProviderId = 'gdrive' | 'github' | 'dropbox' | 'onedrive' | 'mega'
 
+/** One linked account for a provider. A user can connect several — e.g. a
+ *  work and a personal Google Drive — and pick which one to use per upload. */
+export interface ConnectedAccount {
+  id: string
+  email: string
+  connectedAt: string
+}
+
 export interface CloudProvider {
   id: ProviderId
   name: string
   blurb: string
   connected: boolean
-  account: string | null
+  accounts: ConnectedAccount[]
   /** Bytes. null when the provider doesn't report a quota (e.g. GitHub). */
   usedBytes: number | null
   totalBytes: number | null

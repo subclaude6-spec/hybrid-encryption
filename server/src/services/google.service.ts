@@ -1,4 +1,5 @@
 import type { Readable } from 'node:stream'
+import { Types } from 'mongoose'
 import { google } from 'googleapis'
 import type { OAuth2Client } from 'google-auth-library'
 import { env, features } from '../config/env'
@@ -110,12 +111,22 @@ export function buildConsentUrl(state: string): string {
     state,
     // Without this, a second authorisation returns no refresh token and the
     // connection silently dies when the first access token expires.
-    prompt: 'consent',
+    // `select_account` forces Google's account chooser every time, even if
+    // the browser only has one Google session — that's what lets someone
+    // deliberately link a Drive account that differs from how they log in,
+    // or add a second/third Drive account instead of always reusing the
+    // first one Google offers.
+    prompt: 'select_account consent',
     include_granted_scopes: true,
   })
 }
 
-export async function exchangeCode(code: string, user: UserDocument) {
+export interface LinkedAccount {
+  accountId: string
+  accountEmail: string
+}
+
+export async function exchangeCode(code: string, user: UserDocument): Promise<LinkedAccount> {
   const client = createOAuthClient()
   const { tokens } = await client.getToken(code)
 
@@ -129,42 +140,67 @@ export async function exchangeCode(code: string, user: UserDocument) {
   const info = await google.oauth2({ version: 'v2', auth: client }).userinfo.get()
   const accountEmail = info.data.email ?? user.email
 
-  const account = {
-    provider: 'gdrive' as const,
-    accountEmail,
+  const tokenFields = {
     accessToken: tokens.access_token ?? '',
     refreshToken: tokens.refresh_token,
     expiryDate: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
     scope: tokens.scope ?? SCOPES.join(' '),
-    connectedAt: new Date(),
   }
 
-  // Reconnecting replaces the old grant rather than accumulating duplicates.
-  await User.updateOne(
-    { _id: user._id },
-    { $pull: { providerAccounts: { provider: 'gdrive' } } },
+  // Re-authorising the same email refreshes that account's tokens in place;
+  // a different email is linked as an additional account rather than
+  // replacing the existing one.
+  const existing = user.providerAccounts.find(
+    (a) => a.provider === 'gdrive' && a.accountEmail.toLowerCase() === accountEmail.toLowerCase(),
   )
+
+  if (existing) {
+    await User.updateOne(
+      { _id: user._id, 'providerAccounts._id': existing._id },
+      {
+        $set: {
+          'providerAccounts.$.accessToken': tokenFields.accessToken,
+          'providerAccounts.$.refreshToken': tokenFields.refreshToken,
+          'providerAccounts.$.expiryDate': tokenFields.expiryDate,
+          'providerAccounts.$.scope': tokenFields.scope,
+        },
+      },
+    )
+    return { accountId: String(existing._id), accountEmail }
+  }
+
+  const account = {
+    _id: new Types.ObjectId(),
+    provider: 'gdrive' as const,
+    accountEmail,
+    ...tokenFields,
+    connectedAt: new Date(),
+  }
   await User.updateOne({ _id: user._id }, { $push: { providerAccounts: account } })
 
-  return accountEmail
+  return { accountId: String(account._id), accountEmail }
 }
 
 /* --------------------------------------------------------------- client */
 
 /**
- * Returns a Drive client authorised as the user, refreshing the access token if
- * needed and persisting the refreshed one so the next request starts warm.
+ * Returns a Drive client authorised as one specific connected account,
+ * refreshing its access token if needed and persisting the refreshed one so
+ * the next request starts warm. `accountId` picks which of the user's
+ * (possibly several) linked Google accounts to act as.
  */
-export async function getDriveClient(userId: string) {
+export async function getDriveClient(userId: string, accountId: string) {
   assertConfigured()
 
   const user = await User.findById(userId).select(
     '+providerAccounts.accessToken +providerAccounts.refreshToken',
   )
-  const account = user?.providerAccounts.find((a) => a.provider === 'gdrive')
+  const account = user?.providerAccounts.find(
+    (a) => a.provider === 'gdrive' && String(a._id) === accountId,
+  )
 
   if (!user || !account) {
-    throw ApiError.badRequest('Google Drive is not connected for this account.')
+    throw ApiError.badRequest('That Google Drive account is not connected to your profile.')
   }
 
   const client = createOAuthClient()
@@ -177,7 +213,7 @@ export async function getDriveClient(userId: string) {
   client.on('tokens', (tokens) => {
     if (!tokens.access_token) return
     void User.updateOne(
-      { _id: user._id, 'providerAccounts.provider': 'gdrive' },
+      { _id: user._id, 'providerAccounts._id': account._id },
       {
         $set: {
           'providerAccounts.$.accessToken': tokens.access_token,
@@ -192,10 +228,10 @@ export async function getDriveClient(userId: string) {
   return { drive: google.drive({ version: 'v3', auth: client }), accountEmail: account.accountEmail }
 }
 
-export async function disconnect(userId: string) {
+export async function disconnect(userId: string, accountId: string) {
   await User.updateOne(
     { _id: userId },
-    { $pull: { providerAccounts: { provider: 'gdrive' } } },
+    { $pull: { providerAccounts: { _id: accountId, provider: 'gdrive' } } },
   )
 }
 
@@ -226,6 +262,7 @@ export interface UploadResult {
   name: string
   webViewLink: string | null
   sizeBytes: number
+  accountEmail: string
 }
 
 /**
@@ -234,10 +271,11 @@ export interface UploadResult {
  */
 export async function uploadEncrypted(args: {
   userId: string
+  accountId: string
   name: string
   body: Readable
 }): Promise<UploadResult> {
-  const { drive } = await getDriveClient(args.userId)
+  const { drive, accountEmail } = await getDriveClient(args.userId, args.accountId)
   const folderId = await ensureFolder(drive)
 
   const created = await drive.files.create({
@@ -257,6 +295,7 @@ export async function uploadEncrypted(args: {
     name: created.data.name ?? args.name,
     webViewLink: created.data.webViewLink ?? null,
     sizeBytes: Number(created.data.size ?? 0),
+    accountEmail,
   }
 }
 
@@ -274,11 +313,12 @@ export interface DriveFileSummary {
 
 export async function listFiles(args: {
   userId: string
+  accountId: string
   search?: string
   onlyEncrypted?: boolean
   pageToken?: string
 }): Promise<{ files: DriveFileSummary[]; nextPageToken: string | null }> {
-  const { drive } = await getDriveClient(args.userId)
+  const { drive } = await getDriveClient(args.userId, args.accountId)
 
   const clauses = ['trashed=false']
   if (args.search?.trim()) {
@@ -311,8 +351,8 @@ export async function listFiles(args: {
 /* ------------------------------------------------------------ download */
 
 /** Returns a stream of the raw (still encrypted) bytes. */
-export async function downloadFile(userId: string, fileId: string) {
-  const { drive } = await getDriveClient(userId)
+export async function downloadFile(userId: string, accountId: string, fileId: string) {
+  const { drive } = await getDriveClient(userId, accountId)
 
   const meta = await drive.files.get({ fileId, fields: 'id,name,size,mimeType' })
   const stream = await drive.files.get(
@@ -327,7 +367,7 @@ export async function downloadFile(userId: string, fileId: string) {
   }
 }
 
-export async function deleteFile(userId: string, fileId: string) {
-  const { drive } = await getDriveClient(userId)
+export async function deleteFile(userId: string, accountId: string, fileId: string) {
+  const { drive } = await getDriveClient(userId, accountId)
   await drive.files.delete({ fileId })
 }

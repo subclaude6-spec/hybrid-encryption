@@ -37,7 +37,7 @@ export function CloudProviderPicker({
             )}
           >
             {selected ? (
-              <span className="absolute right-3 top-3 flex size-5 items-center justify-center rounded-full bg-brand-500 text-ink-950">
+              <span className="absolute right-3 top-3 flex size-5 items-center justify-center rounded-full bg-brand-500 text-ink-onbrand">
                 <Check className="size-3" strokeWidth={3} />
               </span>
             ) : null}
@@ -47,7 +47,9 @@ export function CloudProviderPicker({
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold text-fg">{provider.name}</p>
                 <p className="truncate text-[11px] text-fg-muted">
-                  {provider.connected ? provider.account : provider.blurb}
+                  {provider.connected
+                    ? `${provider.accounts.length} account${provider.accounts.length > 1 ? 's' : ''} connected`
+                    : provider.blurb}
                 </p>
               </div>
             </div>

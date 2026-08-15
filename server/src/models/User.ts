@@ -10,8 +10,11 @@ export type ProviderId = 'gdrive' | 'github' | 'dropbox' | 'onedrive' | 'mega'
 export type AuthProvider = 'password' | 'google' | 'both'
 
 /** An OAuth link to a cloud provider. Tokens are `select: false` so a stray
- *  `User.find()` can never leak them into an API response. */
+ *  `User.find()` can never leak them into an API response. A user can link
+ *  several accounts for the same provider (e.g. two Google Drive accounts) —
+ *  `_id` is what the UI and upload/download calls use to pick one. */
 export interface ProviderAccount {
+  _id: Types.ObjectId
   provider: ProviderId
   accountEmail: string
   accessToken: string
@@ -59,7 +62,7 @@ const providerAccountSchema = new Schema<ProviderAccount>(
     scope: { type: String, default: '' },
     connectedAt: { type: Date, default: Date.now },
   },
-  { _id: false },
+  { _id: true },
 )
 
 const userSchema = new Schema<UserDocument>(
@@ -104,6 +107,7 @@ const userSchema = new Schema<UserDocument>(
         // even if some future query explicitly selects them back in.
         if (Array.isArray(ret.providerAccounts)) {
           ret.providerAccounts = ret.providerAccounts.map((account: ProviderAccount) => ({
+            id: String(account._id),
             provider: account.provider,
             accountEmail: account.accountEmail,
             connectedAt: account.connectedAt,

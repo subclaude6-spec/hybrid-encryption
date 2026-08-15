@@ -1,3 +1,4 @@
+import path from 'node:path'
 import express, { type RequestHandler } from 'express'
 import session from 'express-session'
 import MongoStore from 'connect-mongo'
@@ -66,6 +67,18 @@ export function createApp() {
   app.use('/api/logs', logRoutes)
   app.use('/api/alerts', alertRoutes)
   app.use('/api/users', userRoutes)
+
+  // On Render (and any single-service deploy) this same process also serves
+  // the built frontend, so the app is reachable at one origin — the client's
+  // relative `/api/...` fetches and WebAuthn's exact-origin check both depend
+  // on that. Only wired up in prod; `vite dev` serves the frontend locally.
+  if (isProd) {
+    const clientDist = path.join(__dirname, '../../dist')
+    app.use(express.static(clientDist))
+    app.get(/^(?!\/api).*/, (_req, res) => {
+      res.sendFile(path.join(clientDist, 'index.html'))
+    })
+  }
 
   app.use(notFoundHandler)
   app.use(errorHandler)

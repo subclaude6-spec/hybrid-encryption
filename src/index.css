@@ -1,29 +1,38 @@
 @import 'tailwindcss';
 
 @theme {
-  /* Base surfaces - deep navy, near-black */
-  --color-ink-950: #070b11;
-  --color-ink-900: #0b111a;
-  --color-ink-850: #101826;
-  --color-ink-800: #16202f;
-  --color-ink-700: #1e2a3c;
-  --color-ink-600: #2a3a52;
+  /* Base surfaces - soft neutral grays, white panels */
+  --color-ink-950: #f6f7f9;
+  --color-ink-900: #ffffff;
+  --color-ink-850: #ffffff;
+  --color-ink-800: #f1f2f5;
+  --color-ink-700: #e4e7ec;
+  --color-ink-600: #cdd3dc;
+
+  /* Fixed dark shade for content that sits on a bright brand-colored fill
+   * (button labels, badge glyphs) — independent of the surface ramp above,
+   * so it doesn't need to track the light/dark direction of the theme. */
+  --color-ink-onbrand: #071a20;
 
   /* Text */
-  --color-fg: #e8eef8;
-  --color-fg-muted: #93a4bd;
-  --color-fg-subtle: #64748b;
+  --color-fg: #131722;
+  --color-fg-muted: #5b6472;
+  --color-fg-subtle: #8890a0;
 
-  /* Brand - cyan/teal reads as "secure" without the cliché green */
-  --color-brand-400: #22d3ee;
-  --color-brand-500: #06b6d4;
-  --color-brand-600: #0891b2;
+  /* Brand - cyan/teal reads as "secure" without the cliché green; deepened
+   * from the dark-theme values so text set in this color keeps AA contrast
+   * on a white background. */
+  --color-brand-400: #0e7490;
+  --color-brand-500: #0891b2;
+  --color-brand-600: #0a6f8c;
+  --color-brand-700: #075873;
 
-  /* Status */
-  --color-ok: #34d399;
-  --color-warn: #fbbf24;
-  --color-danger: #f87171;
-  --color-violet: #a78bfa;
+  /* Status - deepened for the same reason; low-opacity fills (bg-ok/12 etc.)
+   * still read as soft pastel tints against white. */
+  --color-ok: #059669;
+  --color-warn: #b45309;
+  --color-danger: #dc2626;
+  --color-violet: #7c3aed;
 
   --radius-xl2: 0.875rem;
 }
@@ -69,7 +78,7 @@
 
 @layer utilities {
   .glass {
-    background: color-mix(in srgb, var(--color-ink-850) 80%, transparent);
+    background: color-mix(in srgb, var(--color-ink-850) 92%, transparent);
     backdrop-filter: blur(12px);
   }
 

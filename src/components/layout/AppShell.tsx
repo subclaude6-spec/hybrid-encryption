@@ -33,6 +33,8 @@ const EMPLOYEE_NAV: NavItem[] = [
 const ADMIN_NAV: NavItem[] = [
   { to: '/admin', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/admin/employees', label: 'Employees', icon: Users },
+  { to: '/admin/upload', label: 'Encrypt & upload', icon: UploadCloud },
+  { to: '/admin/decrypt', label: 'Decrypt', icon: KeyRound },
   { to: '/admin/vault', label: 'All files', icon: FileLock2 },
   { to: '/admin/logs', label: 'Audit log', icon: ScrollText },
   { to: '/admin/alerts', label: 'Security alerts', icon: Bell },
@@ -58,7 +60,7 @@ export function AppShell() {
       {/* sidebar */}
       <aside className="flex w-60 shrink-0 flex-col border-r border-ink-800 bg-ink-900">
         <div className="flex items-center gap-2.5 px-5 py-5">
-          <span className="flex size-8 items-center justify-center rounded-lg bg-brand-500 text-ink-950">
+          <span className="flex size-8 items-center justify-center rounded-lg bg-brand-500 text-ink-onbrand">
             <ShieldCheck className="size-4.5" strokeWidth={2.4} />
           </span>
           <div className="min-w-0">
