@@ -76,7 +76,15 @@ export function createApp() {
     const clientDist = path.join(__dirname, '../../dist')
     app.use(express.static(clientDist))
     app.get(/^(?!\/api).*/, (_req, res) => {
-      res.sendFile(path.join(clientDist, 'index.html'))
+      // A client navigating away mid-send (very common with the OAuth
+      // redirect flow) aborts the connection — that's not a real error, and
+      // trying to respond again after headers are sent would crash the
+      // process. Only report genuine failures, and only if still possible.
+      res.sendFile(path.join(clientDist, 'index.html'), (err) => {
+        if (err && !res.headersSent) {
+          res.status((err as { status?: number }).status ?? 500).end()
+        }
+      })
     })
   }
 

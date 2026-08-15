@@ -8,7 +8,15 @@ export const notFoundHandler: RequestHandler = (req, _res, next) => {
   next(ApiError.notFound(`No route for ${req.method} ${req.originalUrl}`))
 }
 
-export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
+  // A response already in flight (e.g. a static file send aborted mid-stream
+  // by the client navigating away) can't be re-sent — headers are committed.
+  // Handing off to Express's default handler just closes the connection.
+  if (res.headersSent) {
+    next(err)
+    return
+  }
+
   if (err instanceof ApiError) {
     res.status(err.status).json({
       error: { code: err.code, message: err.message, details: err.details },
