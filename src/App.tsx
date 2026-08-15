@@ -6,6 +6,7 @@ import { AppShell } from '@/components/layout/AppShell'
 import type { Role } from '@/lib/types'
 
 import Login from '@/pages/Login'
+import Privacy from '@/pages/Privacy'
 import Dashboard from '@/pages/employee/Dashboard'
 import Upload from '@/pages/employee/Upload'
 import Decrypt from '@/pages/employee/Decrypt'
@@ -52,6 +53,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<LandingRedirect />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/privacy" element={<Privacy />} />
 
           <Route element={<RequireRole role="employee" />}>
             <Route path="/app" element={<Dashboard />} />
