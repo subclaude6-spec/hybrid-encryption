@@ -19,6 +19,7 @@ import { Modal } from '@/components/ui/Modal'
 import { CloudProviderPicker } from '@/components/CloudProviderPicker'
 import { CloudFileBrowser } from '@/components/CloudFileBrowser'
 import { AccountPicker } from '@/components/AccountPicker'
+import { RepoPicker } from '@/components/RepoPicker'
 import { LocalFileDrop } from '@/components/LocalFileDrop'
 import { ProviderIcon } from '@/components/domain'
 import { providerById } from '@/lib/mock-data'
@@ -45,6 +46,8 @@ export default function Decrypt() {
   const [providerId, setProviderId] = useState<ProviderId | null>(null)
   const [accountId, setAccountId] = useState<string | null>(null)
   const [accountModalOpen, setAccountModalOpen] = useState(false)
+  const [repoName, setRepoName] = useState<string | null>(null)
+  const [repoModalOpen, setRepoModalOpen] = useState(false)
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null)
   const [cloudSelection, setCloudSelection] = useState<string[]>([])
   const [cloudSelectionFiles, setCloudSelectionFiles] = useState<CloudFile[]>([])
@@ -90,8 +93,10 @@ export default function Decrypt() {
         envelope = localFiles[0]
       } else if (mode === 'fetch' && cloudSelection[0] && accountId) {
         setWorkingStage('download')
-        const downloadFn = providerId === 'github' ? downloadFromGithub : downloadFromGoogleDrive
-        envelope = await downloadFn({ accountId, fileId: cloudSelection[0] })
+        envelope =
+          providerId === 'github' && repoName
+            ? await downloadFromGithub({ accountId, repo: repoName, fileId: cloudSelection[0] })
+            : await downloadFromGoogleDrive({ accountId, fileId: cloudSelection[0] })
       } else {
         throw new Error('No file selected.')
       }
@@ -174,6 +179,7 @@ export default function Decrypt() {
     setLocalFiles([])
     setProviderId(null)
     setAccountId(null)
+    setRepoName(null)
     setCloudSelection([])
     setCloudSelectionFiles([])
     setResult(null)
@@ -357,7 +363,9 @@ export default function Decrypt() {
         {/* fetch path */}
         {mode === 'fetch' ? (
           <div className="animate-in-up space-y-4">
-            {!providerId || (isMultiAccount(providerId) && !accountId) ? (
+            {!providerId ||
+            (isMultiAccount(providerId) && !accountId) ||
+            (providerId === 'github' && !repoName) ? (
               <>
                 <div>
                   <h2 className="text-sm font-semibold text-fg">
@@ -401,10 +409,17 @@ export default function Decrypt() {
                     </p>
                     {isMultiAccount(providerId) ? (
                       <p className="truncate text-[11px] text-fg-subtle">
-                        {provider?.accounts.find((a) => a.id === accountId)?.email}
+                        {providerId === 'github' && repoName
+                          ? `${provider?.accounts.find((a) => a.id === accountId)?.email} / ${repoName}`
+                          : provider?.accounts.find((a) => a.id === accountId)?.email}
                       </p>
                     ) : null}
                   </div>
+                  {providerId === 'github' ? (
+                    <Button variant="ghost" size="sm" onClick={() => setRepoModalOpen(true)}>
+                      Change repo
+                    </Button>
+                  ) : null}
                   {isMultiAccount(providerId) && (provider?.accounts.length ?? 0) > 0 ? (
                     <Button variant="ghost" size="sm" onClick={() => setAccountModalOpen(true)}>
                       Change account
@@ -416,6 +431,7 @@ export default function Decrypt() {
                     onClick={() => {
                       setProviderId(null)
                       setAccountId(null)
+                      setRepoName(null)
                       setCloudSelection([])
                       setCloudSelectionFiles([])
                     }}
@@ -428,6 +444,7 @@ export default function Decrypt() {
                   <CloudFileBrowser
                     providerId={providerId}
                     accountId={accountId}
+                    repo={repoName}
                     selectable
                     selectionMode="single"
                     onlyEncrypted
@@ -461,11 +478,17 @@ export default function Decrypt() {
 
       <AccountPicker
         open={accountModalOpen}
-        onClose={() => setAccountModalOpen(false)}
+        onClose={() => {
+          setAccountModalOpen(false)
+          if (accountId && providerId === 'github' && !repoName) setRepoModalOpen(true)
+        }}
         providerName={provider?.name ?? 'cloud'}
         accounts={provider?.accounts ?? []}
         selectedId={accountId}
-        onSelect={setAccountId}
+        onSelect={(id) => {
+          setAccountId(id)
+          setRepoName(null) // a different account means a different set of repos
+        }}
         onConnectAnother={() => {
           setAccountModalOpen(false)
           if (providerId) connectProvider(providerId)
@@ -488,6 +511,17 @@ export default function Decrypt() {
           }
         }}
         disconnectingId={disconnectingId}
+      />
+
+      <RepoPicker
+        open={repoModalOpen}
+        onClose={() => setRepoModalOpen(false)}
+        accountId={providerId === 'github' ? accountId : null}
+        selectedRepo={repoName}
+        onSelect={(repo) => {
+          setRepoName(repo)
+          setRepoModalOpen(false)
+        }}
       />
 
       {/* key prompt */}

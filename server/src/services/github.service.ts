@@ -7,8 +7,8 @@ import { ApiError } from '../utils/ApiError'
 /**
  * GitHub integration.
  *
- * GitHub has no Drive-like blob store — the "cloud storage" here is a
- * private repo the app creates on first connect, and files live in it as
+ * GitHub has no Drive-like blob store — the "cloud storage" here is a repo
+ * the user picks (or creates) on the frontend, and files live in it as
  * commits via the Contents API. Unlike Drive's `drive.file` scope, GitHub
  * has no way to scope an OAuth App down to "only files this app created" —
  * `repo` grants access to all of the account's private repos, which is a
@@ -20,7 +20,6 @@ import { ApiError } from '../utils/ApiError'
  * true streaming.
  */
 const SCOPES = ['repo', 'user:email']
-const REPO_NAME = 'hybrid-cloud-encryption-vault'
 const GITHUB_API = 'https://api.github.com'
 export const MAX_UPLOAD_BYTES = 100 * 1024 ** 2
 
@@ -169,26 +168,79 @@ export async function disconnect(userId: string, accountId: string) {
 
 /* ----------------------------------------------------------------- repo */
 
-/** Finds or creates the app's private repo. Cheap enough to call per upload. */
-async function ensureRepo(token: string, login: string): Promise<void> {
-  const check = await fetch(`${GITHUB_API}/repos/${login}/${REPO_NAME}`, {
-    headers: authHeaders(token),
-  })
-  if (check.ok) return
-  if (check.status !== 404) {
-    throw ApiError.badRequest(`Could not reach GitHub (status ${check.status}).`)
+export interface RepoSummary {
+  name: string
+  private: boolean
+  description: string | null
+  updatedAt: string
+}
+
+/** Repos this account owns outright — Contents API writes need push access,
+ *  and "owner" is the one affiliation that's guaranteed to have it. */
+export async function listRepos(userId: string, accountId: string): Promise<RepoSummary[]> {
+  const { token } = await getGithubAccount(userId, accountId)
+
+  const repos: RepoSummary[] = []
+  let page = 1
+  // GitHub caps per_page at 100; a handful of pages comfortably covers even
+  // a very active account without pulling in pagination-link parsing.
+  for (; page <= 5; page++) {
+    const response = await fetch(
+      `${GITHUB_API}/user/repos?affiliation=owner&per_page=100&page=${page}&sort=updated`,
+      { headers: authHeaders(token) },
+    )
+    if (!response.ok) throw ApiError.badRequest(`Could not list GitHub repos (status ${response.status}).`)
+
+    type Entry = { name: string; private: boolean; description: string | null; updated_at: string }
+    const batch = (await response.json()) as Entry[]
+    repos.push(
+      ...batch.map((r) => ({
+        name: r.name,
+        private: r.private,
+        description: r.description,
+        updatedAt: r.updated_at,
+      })),
+    )
+    if (batch.length < 100) break
   }
 
-  await githubJson(`${GITHUB_API}/user/repos`, {
-    method: 'POST',
-    headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: REPO_NAME,
-      private: true,
-      description: 'Encrypted vault for Hybrid Cloud Encryption. Every file here is ciphertext.',
-      auto_init: true,
-    }),
-  })
+  return repos
+}
+
+export async function createRepo(userId: string, accountId: string, name: string): Promise<RepoSummary> {
+  const { token } = await getGithubAccount(userId, accountId)
+
+  const created = await githubJson<{ name: string; private: boolean; description: string | null; updated_at: string }>(
+    `${GITHUB_API}/user/repos`,
+    {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        private: true,
+        description: 'Encrypted vault for Hybrid Cloud Encryption. Every file here is ciphertext.',
+        auto_init: true,
+      }),
+    },
+  )
+
+  return {
+    name: created.name,
+    private: created.private,
+    description: created.description,
+    updatedAt: created.updated_at,
+  }
+}
+
+/** A clear "that repo doesn't exist (or isn't yours)" error beats a Contents
+ *  API 404 that a client can't easily tell apart from "file not found". */
+async function assertRepoAccess(token: string, login: string, repo: string): Promise<void> {
+  const check = await fetch(`${GITHUB_API}/repos/${login}/${repo}`, { headers: authHeaders(token) })
+  if (check.ok) return
+  if (check.status === 404) {
+    throw ApiError.badRequest(`Repository "${repo}" wasn't found on this GitHub account.`)
+  }
+  throw ApiError.badRequest(`Could not reach GitHub (status ${check.status}).`)
 }
 
 /* --------------------------------------------------------------- upload */
@@ -206,14 +258,15 @@ export interface UploadResult {
 export async function uploadEncrypted(args: {
   userId: string
   accountId: string
+  repo: string
   name: string
   buffer: Buffer
 }): Promise<UploadResult> {
   const { token, login } = await getGithubAccount(args.userId, args.accountId)
-  await ensureRepo(token, login)
+  await assertRepoAccess(token, login, args.repo)
 
   const data = await githubJson<{ content: { sha: string; size: number; path: string; name: string; html_url: string | null } }>(
-    `${GITHUB_API}/repos/${login}/${REPO_NAME}/contents/${encodeURIComponent(args.name)}`,
+    `${GITHUB_API}/repos/${login}/${args.repo}/contents/${encodeURIComponent(args.name)}`,
     {
       method: 'PUT',
       headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
@@ -248,12 +301,13 @@ export interface GithubFileSummary {
 export async function listFiles(args: {
   userId: string
   accountId: string
+  repo: string
   search?: string
   onlyEncrypted?: boolean
 }): Promise<{ files: GithubFileSummary[]; nextPageToken: string | null }> {
   const { token, login } = await getGithubAccount(args.userId, args.accountId)
 
-  const listing = await fetch(`${GITHUB_API}/repos/${login}/${REPO_NAME}/contents/`, {
+  const listing = await fetch(`${GITHUB_API}/repos/${login}/${args.repo}/contents/`, {
     headers: authHeaders(token),
   })
   // The repo doesn't exist until the first upload creates it — an empty
@@ -280,7 +334,7 @@ export async function listFiles(args: {
       let modifiedAt = new Date().toISOString()
       try {
         const commits = await fetch(
-          `${GITHUB_API}/repos/${login}/${REPO_NAME}/commits?path=${encodeURIComponent(entry.path)}&per_page=1`,
+          `${GITHUB_API}/repos/${login}/${args.repo}/commits?path=${encodeURIComponent(entry.path)}&per_page=1`,
           { headers: authHeaders(token) },
         )
         if (commits.ok) {
@@ -307,11 +361,11 @@ export async function listFiles(args: {
 
 /* ------------------------------------------------------------ download */
 
-export async function downloadFile(userId: string, accountId: string, fileId: string) {
+export async function downloadFile(userId: string, accountId: string, repo: string, fileId: string) {
   const { token, login } = await getGithubAccount(userId, accountId)
 
   const response = await fetch(
-    `${GITHUB_API}/repos/${login}/${REPO_NAME}/contents/${encodeURIComponent(fileId)}`,
+    `${GITHUB_API}/repos/${login}/${repo}/contents/${encodeURIComponent(fileId)}`,
     { headers: { ...authHeaders(token), Accept: 'application/vnd.github.raw+json' } },
   )
   if (!response.ok || !response.body) {
@@ -325,16 +379,16 @@ export async function downloadFile(userId: string, accountId: string, fileId: st
   }
 }
 
-export async function deleteFile(userId: string, accountId: string, fileId: string) {
+export async function deleteFile(userId: string, accountId: string, repo: string, fileId: string) {
   const { token, login } = await getGithubAccount(userId, accountId)
 
   const meta = await githubJson<{ sha: string }>(
-    `${GITHUB_API}/repos/${login}/${REPO_NAME}/contents/${encodeURIComponent(fileId)}`,
+    `${GITHUB_API}/repos/${login}/${repo}/contents/${encodeURIComponent(fileId)}`,
     { headers: authHeaders(token) },
   )
 
   const del = await fetch(
-    `${GITHUB_API}/repos/${login}/${REPO_NAME}/contents/${encodeURIComponent(fileId)}`,
+    `${GITHUB_API}/repos/${login}/${repo}/contents/${encodeURIComponent(fileId)}`,
     {
       method: 'DELETE',
       headers: { ...authHeaders(token), 'Content-Type': 'application/json' },

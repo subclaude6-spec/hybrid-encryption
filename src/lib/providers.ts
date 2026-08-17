@@ -49,6 +49,24 @@ export async function disconnectGithub(accountId: string): Promise<void> {
   await api.delete(`/providers/github/${accountId}`)
 }
 
+export interface GithubRepoSummary {
+  name: string
+  private: boolean
+  description: string | null
+  updatedAt: string
+}
+
+export async function fetchGithubRepos(accountId: string): Promise<GithubRepoSummary[]> {
+  const qs = new URLSearchParams({ accountId })
+  const { repos } = await api.get<{ repos: GithubRepoSummary[] }>(`/providers/github/repos?${qs.toString()}`)
+  return repos
+}
+
+export async function createGithubRepo(accountId: string, name: string): Promise<GithubRepoSummary> {
+  const { repo } = await api.post<{ repo: GithubRepoSummary }>('/providers/github/repos', { accountId, name })
+  return repo
+}
+
 export interface DriveFileSummary {
   id: string
   name: string
@@ -102,9 +120,10 @@ export async function fetchDriveFiles(params: {
 
 export async function downloadFromGithub(args: {
   accountId: string
+  repo: string
   fileId: string
 }): Promise<Blob> {
-  const qs = new URLSearchParams({ accountId: args.accountId })
+  const qs = new URLSearchParams({ accountId: args.accountId, repo: args.repo })
   const response = await fetch(
     `/api/providers/github/files/${encodeURIComponent(args.fileId)}/download?${qs.toString()}`,
     { credentials: 'include' },
@@ -126,10 +145,11 @@ export async function downloadFromGithub(args: {
 
 export async function fetchGithubFiles(params: {
   accountId: string
+  repo: string
   search?: string
   onlyEncrypted?: boolean
 }): Promise<{ files: DriveFileSummary[]; nextPageToken: string | null }> {
-  const qs = new URLSearchParams({ accountId: params.accountId })
+  const qs = new URLSearchParams({ accountId: params.accountId, repo: params.repo })
   if (params.search?.trim()) qs.set('search', params.search.trim())
   if (params.onlyEncrypted) qs.set('onlyEncrypted', '1')
   return api.get(`/providers/github/files?${qs.toString()}`)
@@ -156,6 +176,8 @@ export interface ApiVaultFile {
 
 interface UploadArgs {
   accountId: string
+  /** Only meaningful for GitHub, which repo to commit into. */
+  repo?: string
   blob: Blob
   encryptedName: string
   originalName: string
@@ -182,6 +204,7 @@ function uploadEncryptedTo(uploadPath: string, args: UploadArgs): Promise<{ file
       mimeType: args.mimeType,
       originalSize: String(args.originalSize),
     })
+    if (args.repo) qs.set('repo', args.repo)
 
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `${uploadPath}?${qs.toString()}`)

@@ -23,6 +23,9 @@ export interface VaultFileDocument extends Document {
    *  — a user can have several (e.g. two Google Drive accounts). */
   providerAccountId: Types.ObjectId | null
   providerAccountEmail: string | null
+  /** Which GitHub repo holds this file — null for every other provider,
+   *  since only GitHub lets the user pick where files land. */
+  providerRepo: string | null
   /** The provider's own file identifier, e.g. a Google Drive fileId. */
   providerFileId: string
   providerWebLink: string | null
@@ -62,6 +65,7 @@ const vaultFileSchema = new Schema<VaultFileDocument>(
     },
     providerAccountId: { type: Schema.Types.ObjectId, default: null },
     providerAccountEmail: { type: String, default: null },
+    providerRepo: { type: String, default: null },
     providerFileId: { type: String, required: true },
     providerWebLink: { type: String, default: null },
     owner: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },

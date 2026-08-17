@@ -18,6 +18,7 @@ import { Badge, Button, Card, CardHeader, Progress } from '@/components/ui/primi
 import { CloudProviderPicker } from '@/components/CloudProviderPicker'
 import { CloudFileBrowser } from '@/components/CloudFileBrowser'
 import { AccountPicker } from '@/components/AccountPicker'
+import { RepoPicker } from '@/components/RepoPicker'
 import { LocalFileDrop } from '@/components/LocalFileDrop'
 import { ProviderIcon } from '@/components/domain'
 import { ApiRequestError } from '@/lib/api'
@@ -49,6 +50,8 @@ export default function Upload() {
   const [providerId, setProviderId] = useState<ProviderId | null>(null)
   const [accountId, setAccountId] = useState<string | null>(null)
   const [accountModalOpen, setAccountModalOpen] = useState(false)
+  const [repoName, setRepoName] = useState<string | null>(null)
+  const [repoModalOpen, setRepoModalOpen] = useState(false)
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null)
   const [files, setFiles] = useState<File[]>([])
   const [progress, setProgress] = useState<FileProgress[]>([])
@@ -75,7 +78,11 @@ export default function Upload() {
       refreshProviders().catch(() => undefined)
       setProviderId(returnedProvider)
       if (returnedAccountId) setAccountId(returnedAccountId)
-      setStep(1)
+      if (returnedProvider === 'github') {
+        setRepoModalOpen(true)
+      } else {
+        setStep(1)
+      }
       toast({
         tone: 'success',
         title: `${returnedProvider === 'gdrive' ? 'Google Drive' : 'GitHub'} connected`,
@@ -145,6 +152,7 @@ export default function Upload() {
         const uploadFn = providerId === 'github' ? uploadEncryptedToGithub : uploadEncryptedToGoogleDrive
         const { file: record } = await uploadFn({
           accountId,
+          repo: providerId === 'github' ? (repoName ?? undefined) : undefined,
           blob: encrypted.blob,
           encryptedName: encrypted.encryptedName,
           originalName: file.name,
@@ -189,6 +197,7 @@ export default function Upload() {
     setStep(0)
     setProviderId(null)
     setAccountId(null)
+    setRepoName(null)
     setFiles([])
     setProgress([])
     setIssuedKey(null)
@@ -269,12 +278,20 @@ export default function Upload() {
           open={accountModalOpen}
           onClose={() => {
             setAccountModalOpen(false)
-            if (accountId) setStep(1)
+            if (!accountId) return
+            if (providerId === 'github' && !repoName) {
+              setRepoModalOpen(true)
+            } else {
+              setStep(1)
+            }
           }}
           providerName={provider?.name ?? 'cloud'}
           accounts={provider?.accounts ?? []}
           selectedId={accountId}
-          onSelect={setAccountId}
+          onSelect={(id) => {
+            setAccountId(id)
+            setRepoName(null) // a different account means a different set of repos
+          }}
           onConnectAnother={() => {
             setAccountModalOpen(false)
             if (providerId) connectProvider(providerId)
@@ -299,8 +316,29 @@ export default function Upload() {
           disconnectingId={disconnectingId}
         />
 
+        <RepoPicker
+          open={repoModalOpen}
+          onClose={() => {
+            setRepoModalOpen(false)
+            // Cancelling without picking a repo leaves nothing to browse —
+            // send them back rather than showing a stuck, repo-less step 1.
+            if (repoName) setStep(1)
+            else setStep(0)
+          }}
+          accountId={providerId === 'github' ? accountId : null}
+          selectedRepo={repoName}
+          onSelect={(repo) => {
+            setRepoName(repo)
+            setRepoModalOpen(false)
+            setStep(1)
+          }}
+        />
+
         {/* step 2 — pick files */}
-        {step === 1 && provider && (!isMultiAccount(provider.id) || account) ? (
+        {step === 1 &&
+        provider &&
+        (!isMultiAccount(provider.id) || account) &&
+        (provider.id !== 'github' || repoName) ? (
           <div className="animate-in-up grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
             <div className="space-y-4">
               <Card className="p-4">
@@ -311,9 +349,16 @@ export default function Upload() {
                       Uploading to {provider.name}
                     </p>
                     <p className="truncate text-xs text-fg-muted">
-                      {account?.email ?? provider.blurb}
+                      {provider.id === 'github' && repoName
+                        ? `${account?.email} / ${repoName}`
+                        : (account?.email ?? provider.blurb)}
                     </p>
                   </div>
+                  {provider.id === 'github' ? (
+                    <Button variant="ghost" size="sm" onClick={() => setRepoModalOpen(true)}>
+                      Change repo
+                    </Button>
+                  ) : null}
                   <Button
                     variant="ghost"
                     size="sm"
@@ -323,7 +368,7 @@ export default function Upload() {
                         : setStep(0)
                     }
                   >
-                    Change
+                    Change{provider.id === 'github' ? ' account' : ''}
                   </Button>
                 </div>
               </Card>
@@ -376,7 +421,7 @@ export default function Upload() {
                 Current contents of {provider.name}
               </p>
               <div className="min-h-0 flex-1">
-                <CloudFileBrowser providerId={provider.id} accountId={accountId} />
+                <CloudFileBrowser providerId={provider.id} accountId={accountId} repo={repoName} />
               </div>
             </div>
           </div>

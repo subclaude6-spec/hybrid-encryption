@@ -31,6 +31,7 @@ function driveFileToCloudFile(providerId: ProviderId, file: DriveFileSummary): C
 export function CloudFileBrowser({
   providerId,
   accountId,
+  repo,
   selectable = false,
   selectionMode = 'multiple',
   onlyEncrypted = false,
@@ -40,8 +41,10 @@ export function CloudFileBrowser({
 }: {
   providerId: ProviderId
   /** Which of the user's connected accounts to browse. Required once the
-   *  provider is live (gdrive) — ignored for the still-mocked providers. */
+   *  provider is live (gdrive, github) — ignored for the still-mocked providers. */
   accountId?: string | null
+  /** Which repo to browse — GitHub only, required once accountId is set. */
+  repo?: string | null
   selectable?: boolean
   selectionMode?: 'single' | 'multiple'
   onlyEncrypted?: boolean
@@ -54,7 +57,9 @@ export function CloudFileBrowser({
   const [query, setQuery] = useState('')
   const [folder, setFolder] = useState<string | null>(null)
   const provider = providerById(providerId)
-  const isLive = (providerId === 'gdrive' || providerId === 'github') && Boolean(accountId)
+  const isLive =
+    (providerId === 'gdrive' && Boolean(accountId)) ||
+    (providerId === 'github' && Boolean(accountId) && Boolean(repo))
 
   const [driveFiles, setDriveFiles] = useState<CloudFile[]>([])
   const [loading, setLoading] = useState(isLive)
@@ -68,8 +73,11 @@ export function CloudFileBrowser({
     setLoadError(null)
     // Debounced — a query fires a request per keystroke otherwise.
     const timer = setTimeout(() => {
-      const fetchFn = providerId === 'github' ? fetchGithubFiles : fetchDriveFiles
-      fetchFn({ accountId, search: query, onlyEncrypted })
+      const fetchFn =
+        providerId === 'github'
+          ? () => fetchGithubFiles({ accountId, repo: repo!, search: query, onlyEncrypted })
+          : () => fetchDriveFiles({ accountId, search: query, onlyEncrypted })
+      fetchFn()
         .then(({ files: result }) => {
           if (cancelled) return
           setDriveFiles(result.map((f) => driveFileToCloudFile(providerId, f)))
@@ -88,7 +96,7 @@ export function CloudFileBrowser({
       cancelled = true
       clearTimeout(timer)
     }
-  }, [isLive, providerId, accountId, onlyEncrypted, query, refreshTick])
+  }, [isLive, providerId, accountId, repo, onlyEncrypted, query, refreshTick])
 
   const files = useMemo(() => {
     let list: CloudFile[] = isLive ? driveFiles : CLOUD_FILES[providerId] ?? []

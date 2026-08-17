@@ -17,11 +17,13 @@ import {
 import {
   MAX_UPLOAD_BYTES as GITHUB_MAX_UPLOAD_BYTES,
   buildConsentUrl as buildGithubConsentUrl,
+  createRepo as createGithubRepo,
   deleteFile as deleteGithubFile,
   disconnect as disconnectGithub,
   downloadFile as downloadGithubFile,
   exchangeCode as exchangeGithubCode,
   listFiles as listGithubFiles,
+  listRepos as listGithubRepos,
   uploadEncrypted as uploadGithubEncrypted,
 } from '../services/github.service'
 import { recordLog } from '../services/log.service'
@@ -391,11 +393,39 @@ router.delete(
 )
 
 router.get(
+  '/github/repos',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const accountId = z.string().min(1).parse(req.query.accountId)
+    const repos = await listGithubRepos(String(req.currentUser!._id), accountId)
+    res.json({ repos })
+  }),
+)
+
+router.post(
+  '/github/repos',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { accountId, name } = z
+      .object({
+        accountId: z.string().min(1),
+        // GitHub's own repo-name rules: letters, digits, hyphen, underscore, dot.
+        name: z.string().min(1).max(100).regex(/^[\w.-]+$/, 'Only letters, numbers, . _ and - are allowed.'),
+      })
+      .parse(req.body)
+
+    const repo = await createGithubRepo(String(req.currentUser!._id), accountId, name)
+    res.status(201).json({ repo })
+  }),
+)
+
+router.get(
   '/github/files',
   requireAuth,
   asyncHandler(async (req, res) => {
     const schema = z.object({
       accountId: z.string().min(1),
+      repo: z.string().min(1),
       search: z.string().optional(),
       onlyEncrypted: z.enum(['0', '1']).optional(),
     })
@@ -404,6 +434,7 @@ router.get(
     const result = await listGithubFiles({
       userId: String(req.currentUser!._id),
       accountId: query.accountId,
+      repo: query.repo,
       search: query.search,
       onlyEncrypted: query.onlyEncrypted === '1',
     })
@@ -434,11 +465,13 @@ function bufferRequest(req: import('node:stream').Readable, maxBytes: number): P
   })
 }
 
+const githubUploadMetaSchema = uploadMetaSchema.extend({ repo: z.string().min(1) })
+
 router.post(
   '/github/upload',
   requireAuth,
   asyncHandler(async (req, res) => {
-    const meta = uploadMetaSchema.parse(req.query)
+    const meta = githubUploadMetaSchema.parse(req.query)
     const user = req.currentUser!
 
     const buffer = await bufferRequest(req, GITHUB_MAX_UPLOAD_BYTES)
@@ -446,6 +479,7 @@ router.post(
     const uploaded = await uploadGithubEncrypted({
       userId: String(user._id),
       accountId: meta.accountId,
+      repo: meta.repo,
       name: meta.name,
       buffer,
     })
@@ -458,6 +492,7 @@ router.post(
       provider: 'github',
       providerAccountId: meta.accountId,
       providerAccountEmail: uploaded.accountEmail,
+      providerRepo: meta.repo,
       providerFileId: uploaded.fileId,
       providerWebLink: uploaded.webViewLink,
       owner: user._id,
@@ -488,8 +523,9 @@ router.get(
   asyncHandler(async (req, res) => {
     const fileId = z.string().min(1).parse(req.params.fileId)
     const accountId = z.string().min(1).parse(req.query.accountId)
+    const repo = z.string().min(1).parse(req.query.repo)
 
-    const file = await downloadGithubFile(String(req.currentUser!._id), accountId, fileId)
+    const file = await downloadGithubFile(String(req.currentUser!._id), accountId, repo, fileId)
 
     res.setHeader('Content-Type', 'application/octet-stream')
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`)
@@ -510,14 +546,22 @@ router.delete(
   asyncHandler(async (req, res) => {
     const fileId = z.string().min(1).parse(req.params.fileId)
     const userId = String(req.currentUser!._id)
+    // Query-param repo is the fallback for a raw listing entry that never
+    // became a VaultFile record — same pattern as accountId below.
+    const queryRepo = req.query.repo ? z.string().min(1).parse(req.query.repo) : undefined
 
     // Unlike Drive's opaque file ids, a GitHub "file id" is just its
-    // filename — two employees can easily pick the same one, so an
-    // unscoped lookup could resolve to the wrong person's record. Prefer
-    // the caller's own file; only an admin falls back to searching everyone.
-    let record = await VaultFile.findOne({ providerFileId: fileId, provider: 'github', owner: userId })
+    // filename — two employees (or two repos) can easily pick the same one,
+    // so an unscoped lookup could resolve to the wrong record. Prefer the
+    // caller's own file, narrowed by repo when given; only an admin falls
+    // back to searching everyone.
+    const ownFilter: Record<string, unknown> = { providerFileId: fileId, provider: 'github', owner: userId }
+    if (queryRepo) ownFilter.providerRepo = queryRepo
+    let record = await VaultFile.findOne(ownFilter)
     if (!record && req.currentUser!.role === 'admin') {
-      record = await VaultFile.findOne({ providerFileId: fileId, provider: 'github' })
+      const anyFilter: Record<string, unknown> = { providerFileId: fileId, provider: 'github' }
+      if (queryRepo) anyFilter.providerRepo = queryRepo
+      record = await VaultFile.findOne(anyFilter)
     }
     if (record && String(record.owner) !== userId && req.currentUser!.role !== 'admin') {
       throw ApiError.forbidden('You can only delete your own files.')
@@ -527,8 +571,10 @@ router.delete(
       record?.providerAccountId != null
         ? String(record.providerAccountId)
         : z.string().min(1).parse(req.query.accountId)
+    const repo = record?.providerRepo ?? queryRepo
+    if (!repo) throw ApiError.badRequest('Missing repo.')
 
-    await deleteGithubFile(userId, accountId, fileId)
+    await deleteGithubFile(userId, accountId, repo, fileId)
     if (record) await record.deleteOne()
 
     res.json({ ok: true })
