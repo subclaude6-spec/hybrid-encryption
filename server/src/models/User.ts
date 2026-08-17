@@ -18,7 +18,9 @@ export interface ProviderAccount {
   provider: ProviderId
   accountEmail: string
   accessToken: string
-  refreshToken: string
+  /** Google's OAuth flow always returns one; GitHub's classic OAuth Apps
+   *  never do (tokens don't expire there), so this is null for GitHub. */
+  refreshToken: string | null
   expiryDate: Date | null
   scope: string
   connectedAt: Date
@@ -57,7 +59,7 @@ const providerAccountSchema = new Schema<ProviderAccount>(
     },
     accountEmail: { type: String, required: true },
     accessToken: { type: String, required: true, select: false },
-    refreshToken: { type: String, required: true, select: false },
+    refreshToken: { type: String, default: null, select: false },
     expiryDate: { type: Date, default: null },
     scope: { type: String, default: '' },
     connectedAt: { type: Date, default: Date.now },

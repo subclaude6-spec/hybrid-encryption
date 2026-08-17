@@ -14,6 +14,16 @@ import {
   listFiles,
   uploadEncrypted,
 } from '../services/google.service'
+import {
+  MAX_UPLOAD_BYTES as GITHUB_MAX_UPLOAD_BYTES,
+  buildConsentUrl as buildGithubConsentUrl,
+  deleteFile as deleteGithubFile,
+  disconnect as disconnectGithub,
+  downloadFile as downloadGithubFile,
+  exchangeCode as exchangeGithubCode,
+  listFiles as listGithubFiles,
+  uploadEncrypted as uploadGithubEncrypted,
+} from '../services/github.service'
 import { recordLog } from '../services/log.service'
 import { emitToUserAndAdmins } from '../realtime/socket'
 import { ApiError } from '../utils/ApiError'
@@ -34,13 +44,14 @@ router.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const user = req.currentUser!
-    const gdriveAccounts = user.providerAccounts
-      .filter((account) => account.provider === 'gdrive')
-      .map((account) => ({
-        id: String(account._id),
-        email: account.accountEmail,
-        connectedAt: account.connectedAt,
-      }))
+    const accountsFor = (provider: 'gdrive' | 'github') =>
+      user.providerAccounts
+        .filter((account) => account.provider === provider)
+        .map((account) => ({
+          id: String(account._id),
+          email: account.accountEmail,
+          connectedAt: account.connectedAt,
+        }))
 
     res.json({
       providers: [
@@ -48,9 +59,14 @@ router.get(
           id: 'gdrive',
           name: 'Google Drive',
           available: features.googleDrive,
-          accounts: gdriveAccounts,
+          accounts: accountsFor('gdrive'),
         },
-        { id: 'github', name: 'GitHub', available: false, accounts: [] },
+        {
+          id: 'github',
+          name: 'GitHub',
+          available: features.github,
+          accounts: accountsFor('github'),
+        },
         { id: 'dropbox', name: 'Dropbox', available: false, accounts: [] },
         { id: 'onedrive', name: 'OneDrive', available: false, accounts: [] },
         { id: 'mega', name: 'MEGA', available: false, accounts: [] },
@@ -271,7 +287,7 @@ router.delete(
     const fileId = z.string().min(1).parse(req.params.fileId)
     const userId = String(req.currentUser!._id)
 
-    const record = await VaultFile.findOne({ providerFileId: fileId })
+    const record = await VaultFile.findOne({ providerFileId: fileId, provider: 'gdrive' })
     if (record && String(record.owner) !== userId && req.currentUser!.role !== 'admin') {
       throw ApiError.forbidden('You can only delete your own files.')
     }
@@ -285,6 +301,234 @@ router.delete(
         : z.string().min(1).parse(req.query.accountId)
 
     await deleteFile(userId, accountId, fileId)
+    if (record) await record.deleteOne()
+
+    res.json({ ok: true })
+  }),
+)
+
+/* ============================================================== GitHub */
+
+router.get(
+  '/github/connect',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const state = crypto.randomBytes(24).toString('hex')
+    req.session.oauthState = state
+    await new Promise<void>((resolve, reject) =>
+      req.session.save((error) => (error ? reject(error) : resolve())),
+    )
+    res.redirect(buildGithubConsentUrl(state))
+  }),
+)
+
+router.get(
+  '/github/callback',
+  asyncHandler(async (req, res) => {
+    const schema = z.object({
+      code: z.string().optional(),
+      state: z.string().optional(),
+      error: z.string().optional(),
+    })
+    const { code, state, error } = schema.parse(req.query)
+
+    if (error) {
+      return res.redirect(backToApp('/app/upload', { provider: 'github', error }))
+    }
+    if (!req.session.userId) {
+      return res.redirect(backToApp('/login', { error: 'session_expired' }))
+    }
+    if (!code || !state || state !== req.session.oauthState) {
+      return res.redirect(
+        backToApp('/app/upload', { provider: 'github', error: 'invalid_state' }),
+      )
+    }
+
+    delete req.session.oauthState
+
+    const user = await User.findById(req.session.userId)
+    if (!user) return res.redirect(backToApp('/login', { error: 'session_expired' }))
+
+    const returnPath = user.role === 'admin' ? '/admin/upload' : '/app/upload'
+
+    try {
+      const { accountId, accountEmail } = await exchangeGithubCode(code, user)
+      await recordLog({
+        user,
+        action: 'provider_connected',
+        status: 'success',
+        detail: `GitHub account ${accountEmail} linked`,
+        provider: 'github',
+        req,
+      })
+      return res.redirect(
+        backToApp(returnPath, {
+          provider: 'github',
+          connected: '1',
+          account: accountEmail,
+          accountId,
+        }),
+      )
+    } catch (exchangeError) {
+      return res.redirect(
+        backToApp(returnPath, {
+          provider: 'github',
+          error: (exchangeError as Error).message.slice(0, 200),
+        }),
+      )
+    }
+  }),
+)
+
+router.delete(
+  '/github/:accountId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const accountId = z.string().min(1).parse(req.params.accountId)
+    await disconnectGithub(String(req.currentUser!._id), accountId)
+    res.json({ ok: true })
+  }),
+)
+
+router.get(
+  '/github/files',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const schema = z.object({
+      accountId: z.string().min(1),
+      search: z.string().optional(),
+      onlyEncrypted: z.enum(['0', '1']).optional(),
+    })
+    const query = schema.parse(req.query)
+
+    const result = await listGithubFiles({
+      userId: String(req.currentUser!._id),
+      accountId: query.accountId,
+      search: query.search,
+      onlyEncrypted: query.onlyEncrypted === '1',
+    })
+
+    res.json(result)
+  }),
+)
+
+/** Reads the raw request body into memory, up to `maxBytes`. The Contents
+ *  API needs the whole file as one base64 JSON field — there's no streaming
+ *  path the way Drive's upload has — so this cap keeps a bad/huge upload
+ *  from growing this process's memory unbounded. */
+function bufferRequest(req: import('node:stream').Readable, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length
+      if (total > maxBytes) {
+        reject(ApiError.badRequest(`File exceeds GitHub's ${maxBytes / 1024 ** 2}MB limit.`))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
+router.post(
+  '/github/upload',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const meta = uploadMetaSchema.parse(req.query)
+    const user = req.currentUser!
+
+    const buffer = await bufferRequest(req, GITHUB_MAX_UPLOAD_BYTES)
+
+    const uploaded = await uploadGithubEncrypted({
+      userId: String(user._id),
+      accountId: meta.accountId,
+      name: meta.name,
+      buffer,
+    })
+
+    const record = await VaultFile.create({
+      originalName: meta.originalName,
+      encryptedName: uploaded.name,
+      sizeBytes: uploaded.sizeBytes || meta.originalSize,
+      mimeType: meta.mimeType,
+      provider: 'github',
+      providerAccountId: meta.accountId,
+      providerAccountEmail: uploaded.accountEmail,
+      providerFileId: uploaded.fileId,
+      providerWebLink: uploaded.webViewLink,
+      owner: user._id,
+      ownerName: user.name,
+      iv: meta.iv,
+      keyId: meta.keyId,
+      status: 'encrypted',
+    })
+
+    await recordLog({
+      user,
+      action: 'encrypt_upload',
+      status: 'success',
+      detail: `${meta.originalName} encrypted (AES-256-GCM) and uploaded to GitHub (${uploaded.accountEmail})`,
+      provider: 'github',
+      req,
+    })
+
+    emitToUserAndAdmins(String(user._id), 'file:created', record.toJSON())
+
+    res.status(201).json({ file: record.toJSON() })
+  }),
+)
+
+router.get(
+  '/github/files/:fileId/download',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const fileId = z.string().min(1).parse(req.params.fileId)
+    const accountId = z.string().min(1).parse(req.query.accountId)
+
+    const file = await downloadGithubFile(String(req.currentUser!._id), accountId, fileId)
+
+    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`)
+    if (file.sizeBytes) res.setHeader('Content-Length', String(file.sizeBytes))
+
+    file.stream.on('error', (error) => {
+      console.error('GitHub download stream failed:', error)
+      res.destroy(error)
+    })
+
+    file.stream.pipe(res)
+  }),
+)
+
+router.delete(
+  '/github/files/:fileId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const fileId = z.string().min(1).parse(req.params.fileId)
+    const userId = String(req.currentUser!._id)
+
+    // Unlike Drive's opaque file ids, a GitHub "file id" is just its
+    // filename — two employees can easily pick the same one, so an
+    // unscoped lookup could resolve to the wrong person's record. Prefer
+    // the caller's own file; only an admin falls back to searching everyone.
+    let record = await VaultFile.findOne({ providerFileId: fileId, provider: 'github', owner: userId })
+    if (!record && req.currentUser!.role === 'admin') {
+      record = await VaultFile.findOne({ providerFileId: fileId, provider: 'github' })
+    }
+    if (record && String(record.owner) !== userId && req.currentUser!.role !== 'admin') {
+      throw ApiError.forbidden('You can only delete your own files.')
+    }
+
+    const accountId =
+      record?.providerAccountId != null
+        ? String(record.providerAccountId)
+        : z.string().min(1).parse(req.query.accountId)
+
+    await deleteGithubFile(userId, accountId, fileId)
     if (record) await record.deleteOne()
 
     res.json({ ok: true })

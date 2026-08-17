@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import type { CloudFile, ProviderId } from '@/lib/types'
 import { CLOUD_FILES, providerById } from '@/lib/mock-data'
-import { type DriveFileSummary, fetchDriveFiles } from '@/lib/providers'
+import { type DriveFileSummary, fetchDriveFiles, fetchGithubFiles } from '@/lib/providers'
 import { ApiRequestError } from '@/lib/api'
 import { cn, formatBytes, timeAgo } from '@/lib/utils'
 import { Badge, EmptyState, Input } from './ui/primitives'
@@ -54,7 +54,7 @@ export function CloudFileBrowser({
   const [query, setQuery] = useState('')
   const [folder, setFolder] = useState<string | null>(null)
   const provider = providerById(providerId)
-  const isLive = providerId === 'gdrive' && Boolean(accountId)
+  const isLive = (providerId === 'gdrive' || providerId === 'github') && Boolean(accountId)
 
   const [driveFiles, setDriveFiles] = useState<CloudFile[]>([])
   const [loading, setLoading] = useState(isLive)
@@ -68,14 +68,17 @@ export function CloudFileBrowser({
     setLoadError(null)
     // Debounced — a query fires a request per keystroke otherwise.
     const timer = setTimeout(() => {
-      fetchDriveFiles({ accountId, search: query, onlyEncrypted })
+      const fetchFn = providerId === 'github' ? fetchGithubFiles : fetchDriveFiles
+      fetchFn({ accountId, search: query, onlyEncrypted })
         .then(({ files: result }) => {
           if (cancelled) return
           setDriveFiles(result.map((f) => driveFileToCloudFile(providerId, f)))
         })
         .catch((err) => {
           if (cancelled) return
-          setLoadError(err instanceof ApiRequestError ? err.message : 'Could not load Google Drive files.')
+          setLoadError(
+            err instanceof ApiRequestError ? err.message : `Could not load ${provider.name} files.`,
+          )
         })
         .finally(() => {
           if (!cancelled) setLoading(false)
@@ -170,12 +173,12 @@ export function CloudFileBrowser({
         {isLive && loading && files.length === 0 ? (
           <div className="flex h-full items-center justify-center gap-2 text-xs text-fg-muted">
             <Loader2 className="size-4 animate-spin" />
-            Loading Google Drive…
+            Loading {provider.name}…
           </div>
         ) : isLive && loadError ? (
           <EmptyState
             icon={<Folder className="size-5" />}
-            title="Couldn't load Google Drive"
+            title={`Couldn't load ${provider.name}`}
             description={loadError}
           />
         ) : files.length === 0 ? (

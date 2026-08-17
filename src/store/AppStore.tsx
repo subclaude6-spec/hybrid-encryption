@@ -10,8 +10,10 @@ import {
 import { fetchSession, signOut as signOutRequest, toAppUser, type ApiUser } from '@/lib/auth'
 import { api } from '@/lib/api'
 import {
+  disconnectGithub,
   disconnectGoogleDrive,
   fetchProviders,
+  startGithubConnect,
   startGoogleDriveConnect,
 } from '@/lib/providers'
 import { connectSocket, disconnectSocket } from '@/lib/socket'
@@ -356,15 +358,22 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       startGoogleDriveConnect()
       return
     }
-    throw new Error(`${providerById(id).name} isn't wired up yet — Google Drive is the only live provider.`)
+    if (id === 'github') {
+      startGithubConnect()
+      return
+    }
+    throw new Error(`${providerById(id).name} isn't wired up yet.`)
   }, [])
 
   const disconnectProvider = useCallback(
     async (id: ProviderId, accountId: string) => {
-      if (id !== 'gdrive') {
+      if (id === 'gdrive') {
+        await disconnectGoogleDrive(accountId)
+      } else if (id === 'github') {
+        await disconnectGithub(accountId)
+      } else {
         throw new Error(`${providerById(id).name} isn't wired up yet.`)
       }
-      await disconnectGoogleDrive(accountId)
       await refreshProviders()
     },
     [refreshProviders],

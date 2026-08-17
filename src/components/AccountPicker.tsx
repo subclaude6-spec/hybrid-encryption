@@ -5,14 +5,16 @@ import { Modal } from './ui/Modal'
 import { Button } from './ui/primitives'
 
 /**
- * Lets someone pick which of their linked Google Drive accounts to use for
- * an upload or a fetch — the login email and the Drive account are
- * deliberately independent, so this always shows every connected account
- * rather than silently assuming "the one I logged in with".
+ * Lets someone pick which of their linked accounts for a given provider to
+ * use for an upload or a fetch — the login identity and the connected
+ * account are deliberately independent, so this always shows every
+ * connected account rather than silently assuming "the one I logged in
+ * with". Shared between Google Drive and GitHub.
  */
-export function GoogleAccountPicker({
+export function AccountPicker({
   open,
   onClose,
+  providerName,
   accounts,
   selectedId,
   onSelect,
@@ -22,6 +24,7 @@ export function GoogleAccountPicker({
 }: {
   open: boolean
   onClose: () => void
+  providerName: string
   accounts: ConnectedAccount[]
   selectedId: string | null
   onSelect: (accountId: string) => void
@@ -33,7 +36,7 @@ export function GoogleAccountPicker({
     <Modal
       open={open}
       onClose={onClose}
-      title="Choose a Google Drive account"
+      title={`Choose a ${providerName} account`}
       subtitle="Files go to whichever account you pick here — it doesn't have to match your login email."
       icon={<Mail className="size-5" />}
       size="sm"
@@ -98,7 +101,7 @@ export function GoogleAccountPicker({
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-ink-700 bg-ink-900">
             <Plus className="size-4" />
           </span>
-          <span className="text-sm font-medium">Connect another Google account</span>
+          <span className="text-sm font-medium">Connect another {providerName} account</span>
         </button>
       </div>
 

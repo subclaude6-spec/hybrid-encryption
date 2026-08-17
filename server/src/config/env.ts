@@ -30,6 +30,15 @@ const schema = z.object({
     .url()
     .default('http://localhost:5000/api/auth/google/callback'),
 
+  // GitHub OAuth Apps only allow a single callback URL each, unlike Google —
+  // so unlike GOOGLE_REDIRECT_URI there's no separate login/link split here.
+  GITHUB_CLIENT_ID: z.string().optional(),
+  GITHUB_CLIENT_SECRET: z.string().optional(),
+  GITHUB_REDIRECT_URI: z
+    .string()
+    .url()
+    .default('http://localhost:5000/api/providers/github/callback'),
+
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().positive().default(587),
   SMTP_USER: z.string().optional(),
@@ -66,6 +75,7 @@ export const isProd = env.NODE_ENV === 'production'
 /** Feature flags derived from which credentials are actually present. */
 export const features = {
   googleDrive: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
+  github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET),
   email: Boolean(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS),
 }
 
@@ -75,6 +85,7 @@ export function reportFeatureStatus(): void {
 
   console.log('\nFeature status:')
   line('Google Drive', features.googleDrive, 'set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET')
+  line('GitHub', features.github, 'set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET')
   line('Email', features.email, 'set SMTP_HOST, SMTP_USER and SMTP_PASS')
   console.log('')
 }

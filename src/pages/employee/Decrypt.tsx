@@ -18,17 +18,22 @@ import { Badge, Button, Card, CardHeader, Input } from '@/components/ui/primitiv
 import { Modal } from '@/components/ui/Modal'
 import { CloudProviderPicker } from '@/components/CloudProviderPicker'
 import { CloudFileBrowser } from '@/components/CloudFileBrowser'
-import { GoogleAccountPicker } from '@/components/GoogleAccountPicker'
+import { AccountPicker } from '@/components/AccountPicker'
 import { LocalFileDrop } from '@/components/LocalFileDrop'
 import { ProviderIcon } from '@/components/domain'
 import { providerById } from '@/lib/mock-data'
 import { ApiRequestError } from '@/lib/api'
 import { CorruptFileError, decryptFile, WrongKeyError } from '@/lib/crypto'
-import { downloadFromGoogleDrive } from '@/lib/providers'
+import { downloadFromGithub, downloadFromGoogleDrive } from '@/lib/providers'
 import type { CloudFile, ProviderId } from '@/lib/types'
 import { cn, formatBytes } from '@/lib/utils'
 
 type Mode = 'choose' | 'upload' | 'fetch'
+
+/** These are the providers that support multiple linked accounts and need
+ *  the account-picker step — the still-mocked providers don't. */
+const MULTI_ACCOUNT_PROVIDERS: ProviderId[] = ['gdrive', 'github']
+const isMultiAccount = (id: ProviderId) => MULTI_ACCOUNT_PROVIDERS.includes(id)
 
 export default function Decrypt() {
   const { providers, visibleVaultFiles, recordDecryption, connectProvider, disconnectProvider } =
@@ -85,7 +90,8 @@ export default function Decrypt() {
         envelope = localFiles[0]
       } else if (mode === 'fetch' && cloudSelection[0] && accountId) {
         setWorkingStage('download')
-        envelope = await downloadFromGoogleDrive({ accountId, fileId: cloudSelection[0] })
+        const downloadFn = providerId === 'github' ? downloadFromGithub : downloadFromGoogleDrive
+        envelope = await downloadFn({ accountId, fileId: cloudSelection[0] })
       } else {
         throw new Error('No file selected.')
       }
@@ -351,7 +357,7 @@ export default function Decrypt() {
         {/* fetch path */}
         {mode === 'fetch' ? (
           <div className="animate-in-up space-y-4">
-            {!providerId || (providerId === 'gdrive' && !accountId) ? (
+            {!providerId || (isMultiAccount(providerId) && !accountId) ? (
               <>
                 <div>
                   <h2 className="text-sm font-semibold text-fg">
@@ -368,7 +374,7 @@ export default function Decrypt() {
                   onSelect={(id) => {
                     setProviderId(id)
                     const target = providers.find((p) => p.id === id)
-                    if (id === 'gdrive' && (target?.accounts.length ?? 0) > 0) {
+                    if (isMultiAccount(id) && (target?.accounts.length ?? 0) > 0) {
                       setAccountModalOpen(true)
                     }
                   }}
@@ -393,13 +399,13 @@ export default function Decrypt() {
                     <p className="text-sm font-medium text-fg">
                       {providerById(providerId).name}
                     </p>
-                    {providerId === 'gdrive' ? (
+                    {isMultiAccount(providerId) ? (
                       <p className="truncate text-[11px] text-fg-subtle">
                         {provider?.accounts.find((a) => a.id === accountId)?.email}
                       </p>
                     ) : null}
                   </div>
-                  {providerId === 'gdrive' && (provider?.accounts.length ?? 0) > 0 ? (
+                  {isMultiAccount(providerId) && (provider?.accounts.length ?? 0) > 0 ? (
                     <Button variant="ghost" size="sm" onClick={() => setAccountModalOpen(true)}>
                       Change account
                     </Button>
@@ -453,22 +459,24 @@ export default function Decrypt() {
         ) : null}
       </PageBody>
 
-      <GoogleAccountPicker
+      <AccountPicker
         open={accountModalOpen}
         onClose={() => setAccountModalOpen(false)}
+        providerName={provider?.name ?? 'cloud'}
         accounts={provider?.accounts ?? []}
         selectedId={accountId}
         onSelect={setAccountId}
         onConnectAnother={() => {
           setAccountModalOpen(false)
-          connectProvider('gdrive')
+          if (providerId) connectProvider(providerId)
         }}
         onDisconnect={async (id) => {
+          if (!providerId) return
           setDisconnectingId(id)
           try {
-            await disconnectProvider('gdrive', id)
+            await disconnectProvider(providerId, id)
             if (accountId === id) setAccountId(null)
-            toast({ tone: 'info', title: 'Google Drive account disconnected' })
+            toast({ tone: 'info', title: `${provider?.name ?? 'Account'} disconnected` })
           } catch (err) {
             toast({
               tone: 'error',
@@ -522,7 +530,7 @@ export default function Decrypt() {
             <div className="flex items-center gap-2 text-xs text-fg-muted">
               <Loader2 className="size-3.5 animate-spin" />
               {workingStage === 'download'
-                ? 'Downloading the encrypted file from Google Drive…'
+                ? `Downloading the encrypted file from ${provider?.name ?? 'the cloud'}…`
                 : 'Deriving the key and verifying the authentication tag…'}
             </div>
           ) : null}

@@ -41,6 +41,14 @@ export async function disconnectGoogleDrive(accountId: string): Promise<void> {
   await api.delete(`/providers/google/${accountId}`)
 }
 
+export function startGithubConnect(): void {
+  window.location.href = '/api/providers/github/connect'
+}
+
+export async function disconnectGithub(accountId: string): Promise<void> {
+  await api.delete(`/providers/github/${accountId}`)
+}
+
 export interface DriveFileSummary {
   id: string
   name: string
@@ -92,6 +100,41 @@ export async function fetchDriveFiles(params: {
   return api.get(`/providers/google/files?${qs.toString()}`)
 }
 
+export async function downloadFromGithub(args: {
+  accountId: string
+  fileId: string
+}): Promise<Blob> {
+  const qs = new URLSearchParams({ accountId: args.accountId })
+  const response = await fetch(
+    `/api/providers/github/files/${encodeURIComponent(args.fileId)}/download?${qs.toString()}`,
+    { credentials: 'include' },
+  )
+
+  if (!response.ok) {
+    let message = `Download failed with status ${response.status}`
+    try {
+      const body = (await response.json()) as { error?: { message?: string } }
+      message = body?.error?.message ?? message
+    } catch {
+      // Non-JSON error body — the generic status-based message stands.
+    }
+    throw new ApiRequestError(response.status, 'download_failed', message)
+  }
+
+  return response.blob()
+}
+
+export async function fetchGithubFiles(params: {
+  accountId: string
+  search?: string
+  onlyEncrypted?: boolean
+}): Promise<{ files: DriveFileSummary[]; nextPageToken: string | null }> {
+  const qs = new URLSearchParams({ accountId: params.accountId })
+  if (params.search?.trim()) qs.set('search', params.search.trim())
+  if (params.onlyEncrypted) qs.set('onlyEncrypted', '1')
+  return api.get(`/providers/github/files?${qs.toString()}`)
+}
+
 export interface ApiVaultFile {
   id: string
   originalName: string
@@ -111,11 +154,7 @@ export interface ApiVaultFile {
   updatedAt: string
 }
 
-/**
- * Streams an already-encrypted blob to the server via XHR rather than fetch —
- * only XHR exposes upload progress, which the "Encrypt & upload" step shows live.
- */
-export function uploadEncryptedToGoogleDrive(args: {
+interface UploadArgs {
   accountId: string
   blob: Blob
   encryptedName: string
@@ -126,7 +165,13 @@ export function uploadEncryptedToGoogleDrive(args: {
   originalSize: number
   onProgress?: (percent: number) => void
   signal?: AbortSignal
-}): Promise<{ file: ApiVaultFile }> {
+}
+
+/**
+ * Streams an already-encrypted blob to the server via XHR rather than fetch —
+ * only XHR exposes upload progress, which the "Encrypt & upload" step shows live.
+ */
+function uploadEncryptedTo(uploadPath: string, args: UploadArgs): Promise<{ file: ApiVaultFile }> {
   return new Promise((resolve, reject) => {
     const qs = new URLSearchParams({
       accountId: args.accountId,
@@ -139,7 +184,7 @@ export function uploadEncryptedToGoogleDrive(args: {
     })
 
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', `/api/providers/google/upload?${qs.toString()}`)
+    xhr.open('POST', `${uploadPath}?${qs.toString()}`)
     xhr.withCredentials = true
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
 
@@ -176,4 +221,12 @@ export function uploadEncryptedToGoogleDrive(args: {
 
     xhr.send(args.blob)
   })
+}
+
+export function uploadEncryptedToGoogleDrive(args: UploadArgs): Promise<{ file: ApiVaultFile }> {
+  return uploadEncryptedTo('/api/providers/google/upload', args)
+}
+
+export function uploadEncryptedToGithub(args: UploadArgs): Promise<{ file: ApiVaultFile }> {
+  return uploadEncryptedTo('/api/providers/github/upload', args)
 }

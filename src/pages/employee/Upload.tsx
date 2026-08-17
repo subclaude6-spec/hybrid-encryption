@@ -17,17 +17,26 @@ import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import { Badge, Button, Card, CardHeader, Progress } from '@/components/ui/primitives'
 import { CloudProviderPicker } from '@/components/CloudProviderPicker'
 import { CloudFileBrowser } from '@/components/CloudFileBrowser'
-import { GoogleAccountPicker } from '@/components/GoogleAccountPicker'
+import { AccountPicker } from '@/components/AccountPicker'
 import { LocalFileDrop } from '@/components/LocalFileDrop'
 import { ProviderIcon } from '@/components/domain'
 import { ApiRequestError } from '@/lib/api'
 import { encryptFile, generateKeyString } from '@/lib/crypto'
-import { type ApiVaultFile, uploadEncryptedToGoogleDrive } from '@/lib/providers'
+import {
+  type ApiVaultFile,
+  uploadEncryptedToGithub,
+  uploadEncryptedToGoogleDrive,
+} from '@/lib/providers'
 import { getSocket } from '@/lib/socket'
 import type { ProviderId } from '@/lib/types'
 import { cn, formatBytes } from '@/lib/utils'
 
 const STEPS = ['Destination', 'Select files', 'Encrypt & upload', 'Key delivery']
+
+/** These are the providers that support multiple linked accounts and need
+ *  the account-picker step — the still-mocked providers don't. */
+const MULTI_ACCOUNT_PROVIDERS: ProviderId[] = ['gdrive', 'github']
+const isMultiAccount = (id: ProviderId) => MULTI_ACCOUNT_PROVIDERS.includes(id)
 
 type FileProgress = { name: string; percent: number; done: boolean }
 
@@ -62,19 +71,23 @@ export default function Upload() {
     const error = searchParams.get('error')
     const returnedProvider = searchParams.get('provider')
 
-    if (connected === '1' && returnedProvider === 'gdrive') {
+    if (connected === '1' && (returnedProvider === 'gdrive' || returnedProvider === 'github')) {
       refreshProviders().catch(() => undefined)
-      setProviderId('gdrive')
+      setProviderId(returnedProvider)
       if (returnedAccountId) setAccountId(returnedAccountId)
       setStep(1)
       toast({
         tone: 'success',
-        title: 'Google Drive connected',
+        title: `${returnedProvider === 'gdrive' ? 'Google Drive' : 'GitHub'} connected`,
         description: account ? `Signed in as ${account}.` : undefined,
       })
       setSearchParams({}, { replace: true })
     } else if (error) {
-      toast({ tone: 'error', title: 'Could not connect Google Drive', description: error })
+      toast({
+        tone: 'error',
+        title: `Could not connect ${returnedProvider === 'github' ? 'GitHub' : 'Google Drive'}`,
+        description: error,
+      })
       setSearchParams({}, { replace: true })
     }
     // Only ever fires from the redirect that landed on this page — deliberately
@@ -129,7 +142,8 @@ export default function Upload() {
           },
         })
 
-        const { file: record } = await uploadEncryptedToGoogleDrive({
+        const uploadFn = providerId === 'github' ? uploadEncryptedToGithub : uploadEncryptedToGoogleDrive
+        const { file: record } = await uploadFn({
           accountId,
           blob: encrypted.blob,
           encryptedName: encrypted.encryptedName,
@@ -228,9 +242,9 @@ export default function Upload() {
               onSelect={(id) => {
                 setProviderId(id)
                 const target = providers.find((p) => p.id === id)
-                if (id === 'gdrive' && (target?.accounts.length ?? 0) > 0) {
-                  // Several Google accounts can be connected — always ask
-                  // which one, rather than silently reusing the last pick.
+                if (isMultiAccount(id) && (target?.accounts.length ?? 0) > 0) {
+                  // Several accounts can be connected per provider — always
+                  // ask which one, rather than silently reusing the last pick.
                   setAccountModalOpen(true)
                   return
                 }
@@ -251,25 +265,27 @@ export default function Upload() {
           </div>
         ) : null}
 
-        <GoogleAccountPicker
+        <AccountPicker
           open={accountModalOpen}
           onClose={() => {
             setAccountModalOpen(false)
             if (accountId) setStep(1)
           }}
+          providerName={provider?.name ?? 'cloud'}
           accounts={provider?.accounts ?? []}
           selectedId={accountId}
           onSelect={setAccountId}
           onConnectAnother={() => {
             setAccountModalOpen(false)
-            connectProvider('gdrive')
+            if (providerId) connectProvider(providerId)
           }}
           onDisconnect={async (id) => {
+            if (!providerId) return
             setDisconnectingId(id)
             try {
-              await disconnectProvider('gdrive', id)
+              await disconnectProvider(providerId, id)
               if (accountId === id) setAccountId(null)
-              toast({ tone: 'info', title: 'Google Drive account disconnected' })
+              toast({ tone: 'info', title: `${provider?.name ?? 'Account'} disconnected` })
             } catch (err) {
               toast({
                 tone: 'error',
@@ -284,7 +300,7 @@ export default function Upload() {
         />
 
         {/* step 2 — pick files */}
-        {step === 1 && provider && (provider.id !== 'gdrive' || account) ? (
+        {step === 1 && provider && (!isMultiAccount(provider.id) || account) ? (
           <div className="animate-in-up grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
             <div className="space-y-4">
               <Card className="p-4">
@@ -302,7 +318,7 @@ export default function Upload() {
                     variant="ghost"
                     size="sm"
                     onClick={() =>
-                      provider.id === 'gdrive' && provider.accounts.length > 0
+                      isMultiAccount(provider.id) && provider.accounts.length > 0
                         ? setAccountModalOpen(true)
                         : setStep(0)
                     }
@@ -448,9 +464,9 @@ export default function Upload() {
                 <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-ink-700 bg-ink-900 px-4 py-3">
                   <Wifi className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
                   <div className="text-xs leading-relaxed text-fg-muted">
-                    <p className="font-medium text-fg">Uploaded to Google Drive live</p>
+                    <p className="font-medium text-fg">Uploaded to {provider.name} live</p>
                     <p className="mt-1">
-                      Each file now has its own Drive file ID and shows up in your
+                      Each file now has its own {provider.name} file ID and shows up in your
                       administrator's dashboard immediately over the realtime channel.
                     </p>
                   </div>
