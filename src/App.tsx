@@ -41,10 +41,12 @@ function RequireRole({ role }: { role: Role }) {
   return <AppShell />
 }
 
+/** Where "/" sends you: the blog is the public front door for visitors, while
+ *  someone already signed in goes straight back to their own workspace. */
 function LandingRedirect() {
   const { currentUser, bootstrapping } = useApp()
   if (bootstrapping) return <SessionLoading />
-  if (!currentUser) return <Navigate to="/login" replace />
+  if (!currentUser) return <Navigate to="/blog" replace />
   return <Navigate to={currentUser.role === 'admin' ? '/admin' : '/app'} replace />
 }
 
