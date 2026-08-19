@@ -221,6 +221,12 @@ export default function Login() {
         <footer className="mt-10 flex shrink-0 flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] text-fg-subtle">
           <span>&copy; {new Date().getFullYear()} Hybrid Cloud Encryption</span>
           <Link
+            to="/blog"
+            className="transition-colors hover:text-fg-muted hover:underline"
+          >
+            Blog
+          </Link>
+          <Link
             to="/privacy"
             className="transition-colors hover:text-fg-muted hover:underline"
           >

@@ -7,6 +7,8 @@ import type { Role } from '@/lib/types'
 
 import Login from '@/pages/Login'
 import Privacy from '@/pages/Privacy'
+import Blog from '@/pages/Blog'
+import BlogPost from '@/pages/BlogPost'
 import Dashboard from '@/pages/employee/Dashboard'
 import Upload from '@/pages/employee/Upload'
 import Decrypt from '@/pages/employee/Decrypt'
@@ -54,6 +56,8 @@ export default function App() {
           <Route path="/" element={<LandingRedirect />} />
           <Route path="/login" element={<Login />} />
           <Route path="/privacy" element={<Privacy />} />
+          <Route path="/blog" element={<Blog />} />
+          <Route path="/blog/:slug" element={<BlogPost />} />
 
           <Route element={<RequireRole role="employee" />}>
             <Route path="/app" element={<Dashboard />} />
