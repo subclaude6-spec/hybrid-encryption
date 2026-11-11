@@ -5,14 +5,12 @@ import { isProd } from '../config/env'
 import { ApiError } from '../utils/ApiError'
 
 interface ProviderErrorLike {
+  code?: string
+  message?: string
+  errors?: Array<{ message?: string; reason?: string }>
   response?: {
     status?: number
-    data?: {
-      error?: {
-        message?: string
-        status?: string
-      }
-    }
+    data?: unknown
   }
 }
 
@@ -20,6 +18,19 @@ function isProviderApiError(error: unknown): error is ProviderErrorLike {
   if (!error || typeof error !== 'object') return false
   const response = (error as ProviderErrorLike).response
   return Boolean(response && typeof response.status === 'number')
+}
+
+function providerErrorMessage(error: ProviderErrorLike): string | undefined {
+  const data = error.response?.data
+  if (typeof data === 'string' && data.trim()) return data
+  if (data && typeof data === 'object') {
+    const body = data as {
+      error?: { message?: string; error_description?: string }
+      message?: string
+    }
+    return body.error?.message ?? body.error?.error_description ?? body.message
+  }
+  return error.errors?.find((item) => item.message)?.message ?? error.message
 }
 
 export const notFoundHandler: RequestHandler = (req, _res, next) => {
@@ -77,7 +88,7 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
       upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus !== 408
         ? upstreamStatus
         : 502
-    const upstreamMessage = err.response?.data?.error?.message
+    const upstreamMessage = providerErrorMessage(err)
     const message =
       upstreamStatus === 401
         ? 'Cloud provider authorization expired or was revoked. Disconnect and reconnect the account.'
@@ -87,7 +98,9 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
 
     console.error('Cloud provider request failed:', {
       status: upstreamStatus,
+      code: err.code,
       message: upstreamMessage,
+      reasons: err.errors?.map((item) => item.reason).filter(Boolean),
     })
     res.status(status).json({
       error: {
