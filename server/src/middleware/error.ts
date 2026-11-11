@@ -25,10 +25,24 @@ function providerErrorMessage(error: ProviderErrorLike): string | undefined {
   if (typeof data === 'string' && data.trim()) return data
   if (data && typeof data === 'object') {
     const body = data as {
-      error?: { message?: string; error_description?: string }
+      error?:
+        | string
+        | {
+            message?: string
+            error_description?: string
+            status?: string
+          }
+      error_description?: string
       message?: string
     }
-    return body.error?.message ?? body.error?.error_description ?? body.message
+    if (typeof body.error === 'string' && body.error.trim()) return body.error
+    const nestedError = typeof body.error === 'object' && body.error !== null ? body.error : {}
+    return (
+      nestedError.message ??
+      nestedError.error_description ??
+      body.error_description ??
+      body.message
+    )
   }
   return error.errors?.find((item) => item.message)?.message ?? error.message
 }
@@ -94,7 +108,8 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
         ? 'Cloud provider authorization expired or was revoked. Disconnect and reconnect the account.'
         : upstreamStatus === 403
           ? 'Cloud provider denied this operation. Check that the provider API is enabled and the account has access.'
-          : upstreamMessage ?? 'Cloud provider request failed. Check the server logs for details.'
+          : upstreamMessage ??
+            `Cloud provider request failed (HTTP ${upstreamStatus}). Check the Render service logs for details.`
 
     console.error('Cloud provider request failed:', {
       status: upstreamStatus,
@@ -106,7 +121,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
       error: {
         code: 'provider_api_error',
         message,
-        ...(!isProd && { details: upstreamMessage }),
+        details: {
+          providerStatus: upstreamStatus,
+          ...(upstreamMessage && !isProd ? { upstreamMessage } : {}),
+        },
       },
     })
     return
