@@ -49,6 +49,12 @@ function providerErrorMessage(error: ProviderErrorLike): string | undefined {
   return error.errors?.find((item) => item.message)?.message ?? error.message
 }
 
+function isInvalidGrant(error: ProviderErrorLike, message?: string): boolean {
+  return [error.code, error.message, message].some((value) =>
+    value?.toLowerCase().includes('invalid_grant'),
+  )
+}
+
 export const notFoundHandler: RequestHandler = (req, _res, next) => {
   next(ApiError.notFound(`No route for ${req.method} ${req.originalUrl}`))
 }
@@ -105,8 +111,11 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
         ? upstreamStatus
         : 502
     const upstreamMessage = providerErrorMessage(err)
+    const invalidGrant = isInvalidGrant(err, upstreamMessage)
     const message =
-      upstreamStatus === 401
+      invalidGrant
+        ? 'Google Drive authorization has expired or was revoked. Disconnect this Google account, reconnect it, and try again.'
+        : upstreamStatus === 401
         ? 'Cloud provider authorization expired or was revoked. Disconnect and reconnect the account.'
         : upstreamStatus === 400
           ? 'Google Drive rejected the request. Disconnect and reconnect this Google account, then try again.'
@@ -127,6 +136,7 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
         message,
         details: {
           providerStatus: upstreamStatus,
+          ...(invalidGrant ? { reason: 'invalid_grant' } : {}),
           ...(upstreamMessage && !isProd ? { upstreamMessage } : {}),
         },
       },
