@@ -34,6 +34,7 @@ function providerErrorMessage(error: ProviderErrorLike): string | undefined {
           }
       error_description?: string
       message?: string
+      details?: Array<{ message?: string }>
     }
     if (typeof body.error === 'string' && body.error.trim()) return body.error
     const nestedError = typeof body.error === 'object' && body.error !== null ? body.error : {}
@@ -41,7 +42,8 @@ function providerErrorMessage(error: ProviderErrorLike): string | undefined {
       nestedError.message ??
       nestedError.error_description ??
       body.error_description ??
-      body.message
+      body.message ??
+      body.details?.find((detail) => detail.message)?.message
     )
   }
   return error.errors?.find((item) => item.message)?.message ?? error.message
@@ -106,6 +108,8 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
     const message =
       upstreamStatus === 401
         ? 'Cloud provider authorization expired or was revoked. Disconnect and reconnect the account.'
+        : upstreamStatus === 400
+          ? 'Google Drive rejected the request. Disconnect and reconnect this Google account, then try again.'
         : upstreamStatus === 403
           ? 'Cloud provider denied this operation. Check that the provider API is enabled and the account has access.'
           : upstreamMessage ??
